@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline-Terminal Mapping - PORTMAN{% endblock %}
+
+{% block content %}
+<div class="module-header">
+    <h2>Pipeline-Terminal Mapping</h2>
+    <span class="module-code">PLTM01</span>
+</div>
+
+<div class="toolbar">
+    {% if permissions.can_add %}<button class="btn btn-add" onclick="openPanel(null)">+ Add</button>{% endif %}
+    <div class="row-info">Rows: <span id="rowCount">0</span> / <span id="totalCount">0</span></div>
+</div>
+
+<div id="table"></div>
+
+<!-- Slide-over panel -->
+<div id="overlay" class="overlay" onclick="closePanel()" style="display:none;"></div>
+<div id="slidePanel" class="slide-panel" style="display:none;">
+    <div class="panel-header">
+        <h3 id="panelTitle">Add Mapping</h3>
+        <button class="btn-close" onclick="closePanel()">&times;</button>
+    </div>
+    <div class="panel-body">
+        <form id="mappingForm" onsubmit="submitForm(event)">
+            <input type="hidden" id="recordId" name="id">
+            <div class="form-group">
+                <label for="pipelineId">Pipeline <span class="required">*</span></label>
+                <select id="pipelineId" name="pipeline_id" required>
+                    <option value="">-- Select Pipeline --</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="terminalId">Terminal <span class="required">*</span></label>
+                <select id="terminalId" name="terminal_id" required>
+                    <option value="">-- Select Terminal --</option>
+                </select>
+            </div>
+            <div class="form-group form-check">
+                <input type="checkbox" id="isActive" name="is_active" checked>
+                <label for="isActive">Is Active</label>
+            </div>
+            <div class="form-actions">
+                {% if permissions.can_add or permissions.can_edit %}
+                <button type="submit" class="btn btn-save">Save</button>
+                {% endif %}
+                <button type="button" class="btn" onclick="closePanel()">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    addToRecent('PLTM01', 'Pipeline-Terminal Mapping');
+    let table;
+    let pipelines = [];
+    let terminals = [];
+
+    const permissions = {
+        can_edit: {{ permissions.can_edit|default(0) }},
+        can_add: {{ permissions.can_add|default(0) }},
+        can_delete: {{ permissions.can_delete|default(0) }}
+    };
+
+    async function loadDropdowns() {
+        const [pRes, tRes] = await Promise.all([
+            fetch('/api/module/PLTM01/pipelines'),
+            fetch('/api/module/PLTM01/terminals')
+        ]);
+        pipelines = await pRes.json();
+        terminals = await tRes.json();
+
+        const pSel = document.getElementById('pipelineId');
+        pipelines.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.pipeline_name;
+            pSel.appendChild(opt);
+        });
+
+        const tSel = document.getElementById('terminalId');
+        terminals.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = t.terminal_name;
+            tSel.appendChild(opt);
+        });
+    }
+
+    function initTable() {
+        const canEdit = permissions.can_edit || permissions.can_add;
+        const cols = [
+            {title: "ID", field: "id", width: 60},
+            {title: "Pipeline Name", field: "pipeline_name", widthGrow: 2},
+            {title: "Terminal Name", field: "terminal_name", widthGrow: 2},
+            {title: "Active", field: "is_active", formatter: "tickCross", hozAlign: "center", width: 80}
+        ];
+
+        if (canEdit || permissions.can_delete) {
+            cols.push({
+                title: "Actions",
+                formatter: function(cell) {
+                    let btns = '';
+                    if (canEdit) btns += `<button class="btn btn-sm btn-edit" onclick="openPanel(${JSON.stringify(cell.getRow().getData())})">Edit</button> `;
+                    if (permissions.can_delete) btns += `<button class="btn btn-sm btn-delete" onclick="deleteRow(${cell.getRow().getData().id})">Delete</button>`;
+                    return btns;
+                },
+                headerSort: false,
+                width: 140
+            });
+        }
+
+        table = new Tabulator("#table", {
+            height: "calc(100vh - 160px)",
+            layout: "fitColumns",
+            columns: cols,
+            pagination: true,
+            paginationMode: "remote",
+            paginationSize: 20,
+            ajaxURL: "/api/module/PLTM01/data",
+            ajaxResponse: function(url, params, response) {
+                document.getElementById('rowCount').textContent = response.data.length;
+                document.getElementById('totalCount').textContent = response.total;
+                return response;
+            }
+        });
+        if (localStorage.getItem('theme') === 'dark') {
+            document.getElementById('table').classList.add('tabulator-dark');
+        }
+    }
+
+    function openPanel(data) {
+        document.getElementById('panelTitle').textContent = data && data.id ? 'Edit Mapping' : 'Add Mapping';
+        document.getElementById('recordId').value = data ? (data.id || '') : '';
+        document.getElementById('pipelineId').value = data ? (data.pipeline_id || '') : '';
+        document.getElementById('terminalId').value = data ? (data.terminal_id || '') : '';
+        document.getElementById('isActive').checked = data ? !!data.is_active : true;
+        document.getElementById('slidePanel').style.display = 'block';
+        document.getElementById('overlay').style.display = 'block';
+    }
+
+    function closePanel() {
+        document.getElementById('slidePanel').style.display = 'none';
+        document.getElementById('overlay').style.display = 'none';
+        document.getElementById('mappingForm').reset();
+    }
+
+    async function submitForm(e) {
+        e.preventDefault();
+        const id = document.getElementById('recordId').value;
+        const payload = {
+            pipeline_id: parseInt(document.getElementById('pipelineId').value),
+            terminal_id: parseInt(document.getElementById('terminalId').value),
+            is_active: document.getElementById('isActive').checked
+        };
+        if (id) payload.id = parseInt(id);
+
+        const res = await fetch('/api/module/PLTM01/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const result = await res.json();
+        if (result.success) {
+            closePanel();
+            table.setData('/api/module/PLTM01/data');
+        } else {
+            alert(result.error || 'Save failed');
+        }
+    }
+
+    async function deleteRow(id) {
+        if (!confirm('Delete this mapping?')) return;
+        const res = await fetch('/api/module/PLTM01/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: id})
+        });
+        const result = await res.json();
+        if (result.success) {
+            table.setData('/api/module/PLTM01/data');
+        } else {
+            alert(result.error || 'Delete failed');
+        }
+    }
+
+    loadDropdowns().then(() => initTable());
+</script>
+{% endblock %}

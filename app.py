@@ -95,6 +95,11 @@ from modules.FSAP01 import bp as fsap01_bp, MODULE_INFO as fsap01_info
 from modules.FLOG01 import bp as flog01_bp, MODULE_INFO as flog01_info
 from modules.FDCN01 import bp as fdcn01_bp, MODULE_INFO as fdcn01_info
 
+# Import JNPA master modules
+from modules.TRM01 import bp as trm01_bp, MODULE_INFO as trm01_info
+from modules.PLM01 import bp as plm01_bp, MODULE_INFO as plm01_info
+from modules.PLTM01 import bp as pltm01_bp, MODULE_INFO as pltm01_info
+
 # Register existing modules
 register_module(vc01_info['code'], vc01_info['name'], vc01_bp)
 register_module(vtm01_info['code'], vtm01_info['name'], vtm01_bp)
@@ -149,6 +154,11 @@ register_module(gstcfg_info['code'], gstcfg_info['name'], gstcfg_bp)
 register_module(fsap01_info['code'], fsap01_info['name'], fsap01_bp)
 register_module(flog01_info['code'], flog01_info['name'], flog01_bp)
 register_module(fdcn01_info['code'], fdcn01_info['name'], fdcn01_bp)
+
+# Register JNPA master modules
+register_module(trm01_info['code'], trm01_info['name'], trm01_bp)
+register_module(plm01_info['code'], plm01_info['name'], plm01_bp)
+register_module(pltm01_info['code'], pltm01_info['name'], pltm01_bp)
 
 def login_required(f):
     @wraps(f)
