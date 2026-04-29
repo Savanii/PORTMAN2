@@ -83,7 +83,7 @@ from modules.PSMM01 import bp as psmm01_bp, MODULE_INFO as psmm01_info
 from modules.PSOM01 import bp as psom01_bp, MODULE_INFO as psom01_info
 
 # Import reports module
-from modules.RP01 import bp as rp01_bp, MODULE_INFO as rp01_info
+# RP01 reports are out of scope for JNPA Phase 1 (queries dropped MBC/barge tables)
 
 # Import audit logs module
 from modules.AUD01 import bp as aud01_bp, MODULE_INFO as aud01_info
@@ -144,7 +144,7 @@ register_module(psmm01_info['code'], psmm01_info['name'], psmm01_bp)
 register_module(psom01_info['code'], psom01_info['name'], psom01_bp)
 
 # Register reports module
-register_module(rp01_info['code'], rp01_info['name'], rp01_bp)
+# RP01 not registered for JNPA Phase 1
 
 # Register audit logs module
 register_module(aud01_info['code'], aud01_info['name'], aud01_bp)
