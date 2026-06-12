@@ -114,7 +114,18 @@ def get_data(page=1, size=20, filters=None):
             cur.execute('''SELECT vcn_id, cargo_name, bl_quantity, quantity_uom FROM vcn_export_cargo_declaration
                            WHERE vcn_id = ANY(%s) AND cargo_name IS NOT NULL''', (vcn_ids,))
             export_cargo = cur.fetchall()
-            for row_list in [import_cargo, export_cargo]:
+            # Import cargo now lives in the VCN consigner (IGM line) table
+            cur.execute('''SELECT vcn_id, cargo_name, quantity FROM vcn_consigners
+                           WHERE vcn_id = ANY(%s) AND cargo_name IS NOT NULL''', (vcn_ids,))
+            consigner_cargo = []
+            for c in cur.fetchall():
+                try:
+                    qty = float(str(c['quantity']).replace(',', '')) if c['quantity'] else 0.0
+                except ValueError:
+                    qty = 0.0
+                consigner_cargo.append({'vcn_id': c['vcn_id'], 'cargo_name': c['cargo_name'],
+                                        'bl_quantity': qty, 'quantity_uom': 'MT'})
+            for row_list in [import_cargo, export_cargo, consigner_cargo]:
                 for c in row_list:
                     vid = c['vcn_id']
                     if vid not in vcn_cargo:
@@ -496,9 +507,19 @@ def get_closure_eligibility(ldud_id):
     if vcn_id:
         if op_type == 'Export':
             cur.execute('SELECT COALESCE(SUM(bl_quantity), 0) AS total FROM vcn_export_cargo_declaration WHERE vcn_id=%s', (vcn_id,))
+            bl_total = float(cur.fetchone()['total'])
         else:
-            cur.execute('SELECT COALESCE(SUM(bl_quantity), 0) AS total FROM vcn_cargo_declaration WHERE vcn_id=%s', (vcn_id,))
-        bl_total = float(cur.fetchone()['total'])
+            # import quantities come from the consigner (IGM line) table;
+            # fall back to historic cargo declarations for older VCNs
+            cur.execute('SELECT quantity FROM vcn_consigners WHERE vcn_id=%s', (vcn_id,))
+            for r in cur.fetchall():
+                try:
+                    bl_total += float(str(r['quantity']).replace(',', '')) if r['quantity'] else 0.0
+                except ValueError:
+                    pass
+            if bl_total == 0.0:
+                cur.execute('SELECT COALESCE(SUM(bl_quantity), 0) AS total FROM vcn_cargo_declaration WHERE vcn_id=%s', (vcn_id,))
+                bl_total = float(cur.fetchone()['total'])
 
     conn.close()
     eligible = len(missing) == 0

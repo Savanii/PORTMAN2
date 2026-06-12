@@ -1,5 +1,6 @@
+import io
 import json as _json
-from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for
+from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, send_file
 from functools import wraps
 from . import model
 from database import get_user_permissions, get_module_config
@@ -135,28 +136,28 @@ def delete():
     model.delete_header(request.json.get('id'))
     return jsonify({'success': True})
 
-# Nomination endpoints
-@bp.route('/api/module/VCN01/nominations/<int:vcn_id>')
+# Consigner (customer details) endpoints
+@bp.route('/api/module/VCN01/consigners/<int:vcn_id>')
 @login_required
-def get_nominations(vcn_id):
-    return jsonify(model.get_nominations(vcn_id))
+def get_consigners(vcn_id):
+    return jsonify(model.get_consigners(vcn_id))
 
-@bp.route('/api/module/VCN01/nominations/save', methods=['POST'])
+@bp.route('/api/module/VCN01/consigners/save', methods=['POST'])
 @login_required
-def save_nomination():
+def save_consigner():
     perms = get_perms()
     if not perms.get('can_add') and not perms.get('can_edit'):
         return jsonify({'error': 'No permission'}), 403
-    row_id = model.save_nomination(request.json)
+    row_id = model.save_consigner(request.json)
     return jsonify({'success': True, 'id': row_id})
 
-@bp.route('/api/module/VCN01/nominations/delete', methods=['POST'])
+@bp.route('/api/module/VCN01/consigners/delete', methods=['POST'])
 @login_required
-def delete_nomination():
+def delete_consigner():
     perms = get_perms()
     if not perms.get('can_delete'):
         return jsonify({'error': 'No permission to delete'}), 403
-    model.delete_nomination(request.json.get('id'))
+    model.delete_consigner(request.json.get('id'))
     return jsonify({'success': True})
 
 # Delays endpoints
@@ -183,29 +184,32 @@ def delete_delay():
     model.delete_delay(request.json.get('id'))
     return jsonify({'success': True})
 
-# Cargo Declaration endpoints
-@bp.route('/api/module/VCN01/cargo/<int:vcn_id>')
+# IGM (FORM III) document — stored as BYTEA on vcn_header
+@bp.route('/api/module/VCN01/igm_doc/upload/<int:vcn_id>', methods=['POST'])
 @login_required
-def get_cargo(vcn_id):
-    return jsonify(model.get_cargo_declarations(vcn_id))
-
-@bp.route('/api/module/VCN01/cargo/save', methods=['POST'])
-@login_required
-def save_cargo():
+def upload_igm_doc(vcn_id):
     perms = get_perms()
     if not perms.get('can_add') and not perms.get('can_edit'):
         return jsonify({'error': 'No permission'}), 403
-    row_id = model.save_cargo_declaration(request.json)
-    return jsonify({'success': True, 'id': row_id})
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return jsonify({'error': 'No file provided'}), 400
+    if not f.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Only PDF files accepted'}), 400
+    model.save_igm_document(vcn_id, f.filename, f.read())
+    return jsonify({'success': True, 'filename': f.filename})
 
-@bp.route('/api/module/VCN01/cargo/delete', methods=['POST'])
+@bp.route('/api/module/VCN01/igm_doc/<int:vcn_id>')
 @login_required
-def delete_cargo():
-    perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
-    model.delete_cargo_declaration(request.json.get('id'))
-    return jsonify({'success': True})
+def download_igm_doc(vcn_id):
+    file_bytes, filename = model.get_igm_document(vcn_id)
+    if not file_bytes:
+        return jsonify({'error': 'No IGM document uploaded'}), 404
+    return send_file(io.BytesIO(file_bytes), mimetype='application/pdf',
+                     as_attachment=False, download_name=filename or 'igm.pdf')
+
+# Import cargo is declared via the consigner endpoints above;
+# vcn_cargo_declaration stays read-only for historic data (billing/LDUD).
 
 # Export Cargo Declaration endpoints
 @bp.route('/api/module/VCN01/export_cargo/<int:vcn_id>')

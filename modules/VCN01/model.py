@@ -38,7 +38,7 @@ def get_data(page=1, size=20, filters=None):
     cur = get_cursor(conn)
 
     allowed = {'operation_type','vcn_doc_num','vessel_name','vessel_agent_name',
-               'cargo_type','doc_status','doc_date','importer_exporter_name',
+               'cargo_type','doc_status','doc_date',
                'customer_name','load_port','discharge_port'}
     where_clauses, params = [], []
     for f in (filters or []):
@@ -67,8 +67,13 @@ def get_data(page=1, size=20, filters=None):
         total = cur.fetchone()['count']
         cur.execute(f'SELECT * FROM vcn_header {where_sql} ORDER BY id DESC LIMIT %s OFFSET %s',
                     params + [size, (page - 1) * size])
-        rows = cur.fetchall()
-        return [dict(r) for r in rows], total
+        rows = []
+        for r in cur.fetchall():
+            r = dict(r)
+            r.pop('igm_document', None)   # BYTEA — not JSON-serializable
+            r['has_igm_doc'] = bool(r.get('igm_document_name'))
+            rows.append(r)
+        return rows, total
     finally:
         conn.close()
 
@@ -77,6 +82,10 @@ def save_header(data):
     conn = get_db()
     cur = get_cursor(conn)
     row_id = data.get('id')
+
+    # computed / blob fields never come through the JSON save path
+    for k in ('has_igm_doc', 'igm_document', 'igm_document_name'):
+        data.pop(k, None)
 
     if row_id:
         cols = [k for k in data if k not in ['id', 'vcn_doc_num']]
@@ -100,39 +109,60 @@ def delete_header(row_id):
     conn.commit()
     conn.close()
 
-# Nomination sub-table operations
-def get_nominations(vcn_id):
+# Consigner (customer details) sub-table — one row per IGM (FORM III) line
+_CONSIGNER_COLS = ['igm_line_no', 'bl_no', 'bl_date', 'cargo_name', 'quantity',
+                   'consigner_name', 'importer_name', 'agent_name',
+                   'pipeline_name', 'unload_terminal']
+
+def get_consigners(vcn_id):
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('SELECT * FROM vcn_nominations WHERE vcn_id=%s ORDER BY id DESC', (vcn_id,))
+    # igm_line_no is free text ('1', '1 - 4', '4-7') — sort by its leading number
+    cur.execute('''SELECT * FROM vcn_consigners WHERE vcn_id=%s
+                   ORDER BY (substring(igm_line_no from '^[0-9]+'))::int NULLS LAST, id''', (vcn_id,))
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-def save_nomination(data):
+def save_consigner(data):
     _clean_empty(data)
     conn = get_db()
     cur = get_cursor(conn)
     if data.get('id'):
-        cur.execute('''UPDATE vcn_nominations SET eta=%s, etd=%s, vessel_run_type=%s,
-                       arrival_fore_draft=%s, arrival_after_draft=%s WHERE id=%s''',
-                   [data.get('eta'), data.get('etd'), data.get('vessel_run_type'),
-                    data.get('arrival_fore_draft'), data.get('arrival_after_draft'), data['id']])
+        cur.execute(f"UPDATE vcn_consigners SET {', '.join(f'{c}=%s' for c in _CONSIGNER_COLS)} WHERE id=%s",
+                   [data.get(c) for c in _CONSIGNER_COLS] + [data['id']])
         row_id = data['id']
     else:
-        cur.execute('''INSERT INTO vcn_nominations (vcn_id, eta, etd, vessel_run_type, arrival_fore_draft, arrival_after_draft)
-                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING id''',
-                   [data['vcn_id'], data.get('eta'), data.get('etd'), data.get('vessel_run_type'),
-                    data.get('arrival_fore_draft'), data.get('arrival_after_draft')])
+        cur.execute(f'''INSERT INTO vcn_consigners (vcn_id, {', '.join(_CONSIGNER_COLS)})
+                       VALUES ({', '.join(['%s'] * (len(_CONSIGNER_COLS) + 1))}) RETURNING id''',
+                   [data['vcn_id']] + [data.get(c) for c in _CONSIGNER_COLS])
         row_id = cur.fetchone()['id']
     conn.commit()
     conn.close()
     return row_id
 
-def delete_nomination(row_id):
+def save_igm_document(vcn_id, filename, file_bytes):
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('DELETE FROM vcn_nominations WHERE id=%s', (row_id,))
+    cur.execute('UPDATE vcn_header SET igm_document=%s, igm_document_name=%s WHERE id=%s',
+                [file_bytes, filename, vcn_id])
+    conn.commit()
+    conn.close()
+
+def get_igm_document(vcn_id):
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('SELECT igm_document, igm_document_name FROM vcn_header WHERE id=%s', (vcn_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row or not row['igm_document']:
+        return None, None
+    return bytes(row['igm_document']), row['igm_document_name']
+
+def delete_consigner(row_id):
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('DELETE FROM vcn_consigners WHERE id=%s', (row_id,))
     conn.commit()
     conn.close()
 
@@ -168,52 +198,33 @@ def delete_delay(row_id):
     conn.commit()
     conn.close()
 
-# Cargo Declaration sub-table operations (updated)
-def get_cargo_declarations(vcn_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('SELECT * FROM vcn_cargo_declaration WHERE vcn_id=%s ORDER BY id DESC', (vcn_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+# Import cargo is declared in the consigner table now; vcn_cargo_declaration
+# remains read-only for historic data (billing/LDUD still query it).
 def get_all_cargo_names_for_vcn(vcn_id):
-    """Get all cargo names for a VCN from both import and export declaration tables"""
+    """All cargo names for a VCN — consigners plus historic declarations."""
     conn = get_db()
     cur = get_cursor(conn)
     cur.execute('''
         SELECT DISTINCT cargo_name FROM (
+            SELECT cargo_name FROM vcn_consigners WHERE vcn_id=%s AND cargo_name IS NOT NULL
+            UNION
             SELECT cargo_name FROM vcn_cargo_declaration WHERE vcn_id=%s AND cargo_name IS NOT NULL
             UNION
             SELECT cargo_name FROM vcn_export_cargo_declaration WHERE vcn_id=%s AND cargo_name IS NOT NULL
         ) combined ORDER BY cargo_name
-    ''', (vcn_id, vcn_id))
+    ''', (vcn_id, vcn_id, vcn_id))
     rows = cur.fetchall()
     conn.close()
-    return [r['cargo_name'] for r in rows if r['cargo_name']]
-
-def save_cargo_declaration(data):
-    _clean_empty(data)
-    conn = get_db()
-    cur = get_cursor(conn)
-    if data.get('id'):
-        cur.execute('''UPDATE vcn_cargo_declaration SET cargo_name=%s, bl_no=%s, bl_date=%s, bl_quantity=%s,
-                       quantity_uom=%s, customer_name=%s, igm_number=%s, igm_manual_number=%s, igm_date=%s WHERE id=%s''',
-                   [data.get('cargo_name'), data.get('bl_no'), data.get('bl_date'), data.get('bl_quantity'),
-                    data.get('quantity_uom'), data.get('customer_name'),
-                    data.get('igm_number'), data.get('igm_manual_number'), data.get('igm_date'), data['id']])
-        row_id = data['id']
-    else:
-        cur.execute('''INSERT INTO vcn_cargo_declaration (vcn_id, cargo_name, bl_no, bl_date, bl_quantity,
-                       quantity_uom, customer_name, igm_number, igm_manual_number, igm_date)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-                   [data['vcn_id'], data.get('cargo_name'), data.get('bl_no'), data.get('bl_date'), data.get('bl_quantity'),
-                    data.get('quantity_uom'), data.get('customer_name'),
-                    data.get('igm_number'), data.get('igm_manual_number'), data.get('igm_date')])
-        row_id = cur.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return row_id
+    names = []
+    for r in rows:
+        if not r['cargo_name']:
+            continue
+        # consigner rows may hold comma-separated cargo lists
+        for name in r['cargo_name'].split(','):
+            name = name.strip()
+            if name and name not in names:
+                names.append(name)
+    return sorted(names)
 
 # Export Cargo Declaration sub-table operations
 def get_export_cargo_declarations(vcn_id):
@@ -272,22 +283,6 @@ def get_export_cargo_total_quantity(vcn_id):
     conn.close()
     return result or 0
 
-def delete_cargo_declaration(row_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('DELETE FROM vcn_cargo_declaration WHERE id=%s', (row_id,))
-    conn.commit()
-    conn.close()
-
-def get_cargo_total_quantity(vcn_id):
-    """Get total BL quantity from cargo declarations for a VCN (replaces IGM total)"""
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('SELECT SUM(bl_quantity) FROM vcn_cargo_declaration WHERE vcn_id=%s', (vcn_id,))
-    result = cur.fetchone()['sum']
-    conn.close()
-    return result or 0
-
 def get_export_loading_totals(vcn_id):
     """Get loading totals from LDUD MV Anchorage Loading for a VCN, grouped by cargo_name for BL quantity"""
     conn = get_db()
@@ -330,7 +325,7 @@ def get_approval_eligibility(vcn_id):
     conn = get_db()
     cur = get_cursor(conn)
     cur.execute('''SELECT operation_type, vessel_name, vessel_agent_name,
-                          importer_exporter_name, cargo_type, discharge_port
+                          cargo_type, discharge_port
                    FROM vcn_header WHERE id=%s''', (vcn_id,))
     header = cur.fetchone()
     if not header:
@@ -344,8 +339,6 @@ def get_approval_eligibility(vcn_id):
         missing.append('Vessel Name')
     if not header['vessel_agent_name']:
         missing.append('Agent Name')
-    if not header['importer_exporter_name']:
-        missing.append('Stevedore Name')
     if not header['cargo_type']:
         missing.append('Cargo Type')
     if not header['discharge_port']:
@@ -359,15 +352,16 @@ def get_approval_eligibility(vcn_id):
                        AND quantity_uom IS NOT NULL AND quantity_uom != \'\'
                        AND bl_no IS NOT NULL AND bl_no != \'\'
                        AND bl_date IS NOT NULL''', (vcn_id,))
+        if cur.fetchone()['cnt'] < 1:
+            missing.append('Export Cargo Declaration (min 1 complete entry: cargo name, BL no, date, quantity, UOM)')
     else:
-        cur.execute('''SELECT COUNT(*) as cnt FROM vcn_cargo_declaration
-                       WHERE vcn_id=%s AND cargo_name IS NOT NULL AND cargo_name != \'\'
-                       AND bl_quantity IS NOT NULL AND bl_quantity > 0
-                       AND quantity_uom IS NOT NULL AND quantity_uom != \'\'
-                       AND bl_no IS NOT NULL AND bl_no != \'\'
-                       AND bl_date IS NOT NULL''', (vcn_id,))
-    if cur.fetchone()['cnt'] < 1:
-        missing.append('Cargo Declaration (min 1 complete entry: cargo name, BL no, date, quantity, UOM)')
+        # import cargo is declared via the consigner (customer details) table
+        cur.execute('''SELECT COUNT(*) as cnt FROM vcn_consigners
+                       WHERE vcn_id=%s AND consigner_name IS NOT NULL AND consigner_name != \'\'
+                       AND cargo_name IS NOT NULL AND cargo_name != \'\'
+                       AND quantity IS NOT NULL AND quantity != \'\'''', (vcn_id,))
+        if cur.fetchone()['cnt'] < 1:
+            missing.append('Consigner Details (min 1 entry with consigner, cargo and quantity)')
 
     conn.close()
     return {'eligible': len(missing) == 0, 'missing': missing}

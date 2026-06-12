@@ -398,6 +398,9 @@
     </div>
 </div>
 
+<!-- Hidden file input for IGM (FORM III) PDF upload -->
+<input type="file" id="igmFileInput" accept=".pdf" style="display:none;" onchange="uploadIgmDoc(this)">
+
 <!-- Approval Info Modal -->
 <div id="approvalInfoModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99999;align-items:center;justify-content:center;">
     <div style="background:white;border-radius:8px;padding:24px;max-width:460px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,0.3);">
@@ -445,13 +448,13 @@
     let table;
     let vessels = [];
     let vesselAgents = [];
-    let importerExporters = [];
     let customers = [];
+    let pipelineNames = [];
+    let terminalNames = [];
     let cargoTypes = [];
     let docSeries = [];
     let defaultDocSeries = '';
     let dischargeTypes = ['Full Discharge', 'Partial Discharge'];
-    let runTypes = [];
     let delayTypes = [];
     let cargoNames = [];
     let quantityUoms = [];
@@ -480,6 +483,43 @@
 
     function getTodayDate() {
         return new Date().toISOString().split('T')[0];
+    }
+
+    // Same palette as EV01 — multiple cargos (comma-separated) show as coloured pills
+    const PILL_COLORS = [
+        ['#1a6fa8','#dbeeff'], ['#1e8449','#d4efdf'], ['#b7770d','#fef3cd'],
+        ['#7d3c98','#f0e6ff'], ['#b03a2e','#fde8e8'], ['#117a65','#d1f2eb'],
+        ['#1f618d','#d6eaf8'], ['#784212','#fdebd0'],
+    ];
+
+    function cargoPillFormatter(cell) {
+        const v = cell.getValue();
+        if (!v) return '';
+        return String(v).split(',').map((s, i) => {
+            const [fg, bg] = PILL_COLORS[i % PILL_COLORS.length];
+            return `<span style="display:inline-block;background:${bg};border:1px solid ${fg};color:${fg};padding:1px 7px;border-radius:10px;font-size:10px;margin:1px 2px;white-space:nowrap;">${s.trim()}</span>`;
+        }).join('');
+    }
+
+    // ── IGM (FORM III) PDF upload — stored as BYTEA on the header ────────────
+    async function uploadIgmDoc(input) {
+        const file = input.files[0];
+        if (!file || !currentVcnId) { input.value = ''; return; }
+        input.value = '';
+        const fd = new FormData();
+        fd.append('file', file);
+        try {
+            const res = await fetch(`/api/module/VCN01/igm_doc/upload/${currentVcnId}`, {method: 'POST', body: fd});
+            const result = await res.json();
+            if (result.error) { alert('IGM upload failed: ' + result.error); return; }
+            const btn = document.getElementById(`igmViewBtn-${currentVcnId}`);
+            if (btn) btn.style.display = '';
+            const hRow = table.getRows().find(r => r.getData().id === currentVcnId);
+            if (hRow) hRow.update({has_igm_doc: true, igm_document_name: result.filename});
+            showStatus('IGM uploaded', 'saved');
+        } catch (e) {
+            alert('IGM upload error: ' + e.message);
+        }
     }
 
     function showStatus(message, type) {
@@ -563,31 +603,31 @@
     }
 
     async function loadMasterData() {
-        const [vesselsRes, agentsRes, ieRes, custRes, cargoRes, dsRes, rtRes, dmRes, cnRes, uomRes, holdRes, portRes, configRes] = await Promise.all([
+        const [vesselsRes, agentsRes, custRes, cargoRes, dsRes, dmRes, cnRes, uomRes, holdRes, portRes, plRes, trRes, configRes] = await Promise.all([
             fetch('/api/module/VCN01/vessels'),
             fetch('/api/module/VAM01/all'),
-            fetch('/api/module/VSDM01/all'),
             fetch('/api/module/VCUM01/all'),
             fetch('/api/module/VCG01/types'),
             fetch('/api/module/VCDS01/all'),
-            fetch('/api/module/VRT01/all'),
             fetch('/api/module/VDM01/all'),
             fetch('/api/module/VCG01/names'),
             fetch('/api/module/VQM01/all'),
             fetch('/api/module/VHO01/all'),
             fetch('/api/module/VPM01/all'),
+            fetch('/api/module/PLM01/all'),
+            fetch('/api/module/TRM01/all'),
             fetch('/admin/api/config/VCN01')
         ]);
         vessels = await vesselsRes.json();
         vesselAgents = await agentsRes.json();
-        importerExporters = await ieRes.json();
         customers = await custRes.json();
+        pipelineNames = await plRes.json();
+        terminalNames = await trRes.json();
         cargoTypes = await cargoRes.json();
         const dsData = await dsRes.json();
         docSeries = dsData.map(d => d.name);
         const defaultDs = dsData.find(d => d.is_default);
         defaultDocSeries = defaultDs ? defaultDs.name : '';
-        runTypes = await rtRes.json();
         delayTypes = await dmRes.json();
         cargoNames = await cnRes.json();
         quantityUoms = await uomRes.json();
@@ -653,14 +693,18 @@
                 }
             },
             {title: "Vessel Name", field: "vessel_name", width: 130},
+            {title: "LOA", field: "loa", editor: canEdit ? "number" : false, width: 75, hozAlign: "right"},
+            {title: "DFT", field: "draft", editor: canEdit ? "number" : false, width: 70, hozAlign: "right"},
+            {title: "Berth", field: "berth_name", editor: canEdit ? "input" : false, width: 100},
+            {title: "NOR Tendered", field: "nor_tendered", width: 140, formatter: datetimeCellFormatter,
+                editor: canEdit ? datetimeEditor : false},
             {title: "Vessel Agent", field: "vessel_agent_name", editor: canEdit ? "list" : false,
                 editorParams: {values: vesselAgents, autocomplete: true, allowEmpty: true}, width: 120},
-            {title: "Stevedore", field: "importer_exporter_name", editor: canEdit ? "list" : false,
-                editorParams: {values: importerExporters, autocomplete: true, allowEmpty: true}, width: 130},
             {title: "Customer", field: "customer_name", editor: canEdit ? "list" : false,
                 editorParams: {values: customers, autocomplete: true, allowEmpty: true}, width: 120},
             {title: "Cargo Type", field: "cargo_type", editor: canEdit ? "list" : false,
-                editorParams: {values: cargoTypes, autocomplete: true, allowEmpty: true}, width: 100},
+                editorParams: {values: cargoTypes, autocomplete: true, allowEmpty: true}, width: 140,
+                formatter: cargoPillFormatter},
             {title: "Doc Series", field: "vcn_doc_series", editor: canEdit ? "list" : false,
                 editorParams: {values: docSeries, autocomplete: true, allowEmpty: true}, width: 100},
             {title: "Discharge Type", field: "type_of_discharge", editor: canEdit ? "list" : false,
@@ -669,7 +713,8 @@
                 editorParams: {values: portOptions, autocomplete: true, allowEmpty: true}, width: 110},
             {title: "Discharge Port", field: "discharge_port", editor: canEdit ? "list" : false,
                 editorParams: {values: portOptions, autocomplete: true, allowEmpty: true}, width: 110},
-            {title: "Doc Date", field: "doc_date", width: 120, formatter: dateCellFormatter},
+            {title: "Doc Date", field: "doc_date", width: 120, formatter: dateCellFormatter,
+                editor: canEdit ? dateEditor : false},
             {title: "Created By", field: "created_by", width: 90},
             {title: "Status", field: "doc_status", width: 105, headerSort: false,
                 formatter: function(cell) {
@@ -809,7 +854,8 @@
             lockBanner.style.display = 'none';
         }
 
-        // Build cargo section based on operation type
+        // Export gets its cargo declaration section; import cargo is declared
+        // in the Consigner (Customer Details) table instead.
         let cargoSection = '';
         if (operationType === 'Export') {
             cargoSection = `
@@ -823,18 +869,6 @@
                 </div>
                 <div class="sub-section-content"><div id="export-cargo-table-${vcnId}" class="sub-tabulator"></div></div>
             </div>`;
-        } else {
-            cargoSection = `
-            <div class="sub-section">
-                <div class="sub-section-header" data-section="cargo">
-                    <span>Cargo Declaration</span>
-                    <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('cargo', ${vcnId})">+ Add</button>` : ''}
-                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('cargo', ${vcnId})">Save</button>` : ''}
-                    </div>
-                </div>
-                <div class="sub-section-content"><div id="cargo-table-${vcnId}" class="sub-tabulator"></div></div>
-            </div>`;
         }
 
         // Create the sub-table container
@@ -842,14 +876,16 @@
         subContainer.className = 'sub-table-container';
         subContainer.innerHTML = `
             <div class="sub-section">
-                <div class="sub-section-header" data-section="nominations">
-                    <span>Nomination Details</span>
+                <div class="sub-section-header" data-section="consigners">
+                    <span>Consigner (Customer Details) — IGM Lines</span>
                     <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('nominations', ${vcnId})">+ Add</button>` : ''}
-                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('nominations', ${vcnId})">Save</button>` : ''}
+                        ${canAct ? `<button class="btn-sub-add" style="background:#8e44ad;" onclick="document.getElementById('igmFileInput').click()">⬆ IGM PDF</button>` : ''}
+                        <button id="igmViewBtn-${vcnId}" class="btn-sub-save" style="background:#2b6cb0;${data.has_igm_doc ? '' : 'display:none;'}" onclick="window.open('/api/module/VCN01/igm_doc/${vcnId}', '_blank')">📄 View IGM</button>
+                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('consigners', ${vcnId})">+ Add Line</button>` : ''}
+                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('consigners', ${vcnId})">Save</button>` : ''}
                     </div>
                 </div>
-                <div class="sub-section-content"><div id="nominations-table-${vcnId}" class="sub-tabulator"></div></div>
+                <div class="sub-section-content"><div id="consigners-table-${vcnId}" class="sub-tabulator"></div></div>
             </div>
             ${cargoSection}
             <div class="sub-section">
@@ -924,10 +960,6 @@
         const canEdit = (permissions.can_edit || permissions.can_add) && _isUnlocked;
         const isDark = localStorage.getItem('theme') === 'dark';
 
-        // Run type options for nominations
-        const runTypeOptions = {};
-        runTypes.forEach(r => { runTypeOptions[r] = r; });
-
         // Delay type options
         const delayOptions = {};
         delayTypes.forEach(d => { delayOptions[d] = d; });
@@ -936,35 +968,58 @@
         const cargoOptions = {};
         cargoNames.forEach(c => { cargoOptions[c] = c; });
 
-        // Nominations table
-        subTables[vcnId].nominations = new Tabulator(`#nominations-table-${vcnId}`, {
+        // Consigner (customer details) table
+        const agentOptions = {};
+        vesselAgents.forEach(a => { agentOptions[a] = a; });
+        const pipelineOptions = {};
+        pipelineNames.forEach(p => { pipelineOptions[p] = p; });
+        const consignerOptions = {};
+        customers.forEach(c => { consignerOptions[c] = c; });
+        const terminalOptions = {};
+        terminalNames.forEach(t => { terminalOptions[t] = t; });
+
+        // One row per IGM (FORM III) line
+        subTables[vcnId].consigners = new Tabulator(`#consigners-table-${vcnId}`, {
             layout: "fitColumns",
-            height: 150,
-            ajaxURL: `/api/module/VCN01/nominations/${vcnId}`,
+            height: 180,
+            ajaxURL: `/api/module/VCN01/consigners/${vcnId}`,
             columnDefaults: { headerSort: false },
-            cellEdited: () => markDirty('nominations'),
+            cellEdited: () => markDirty('consigners'),
             columns: [
-                {title: "ETA", field: "eta", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter
+                {title: "Ln", field: "igm_line_no", width: 70, widthGrow: 0, hozAlign: "center",
+                    editor: canEdit ? "input" : false
                 },
-                {title: "ETD", field: "etd", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter
+                {title: "BL No", field: "bl_no", widthGrow: 1, editor: canEdit ? "input" : false},
+                {title: "BL Date", field: "bl_date", widthGrow: 0.9, editor: canEdit ? dateEditor : false,
+                    formatter: dateCellFormatter
                 },
-                {title: "Vessel Run Type", field: "vessel_run_type", widthGrow: 1, editor: canEdit ? "list" : false,
-                    editorParams: {values: runTypeOptions, autocomplete: true, allowEmpty: true}
+                {title: "Cargo Name", field: "cargo_name", widthGrow: 1.2, editor: canEdit ? "list" : false,
+                    editorParams: {values: cargoOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true}
                 },
-                {title: "Arrival Fore Draft", field: "arrival_fore_draft", widthGrow: 1, hozAlign: "right",
-                    editor: canEdit ? "number" : false, editorParams: {min: 0, step: 0.01}
+                {title: "Qty (MT)", field: "quantity", widthGrow: 0.8, hozAlign: "right",
+                    editor: canEdit ? "number" : false, editorParams: {min: 0, step: 0.001}
                 },
-                {title: "Arrival After Draft", field: "arrival_after_draft", widthGrow: 1, hozAlign: "right",
-                    editor: canEdit ? "number" : false, editorParams: {min: 0, step: 0.01}
+                {title: "Consignee", field: "consigner_name", widthGrow: 1.3, editor: canEdit ? "list" : false,
+                    editorParams: {values: consignerOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true}
+                },
+                {title: "Importer", field: "importer_name", widthGrow: 1.3, editor: canEdit ? "list" : false,
+                    editorParams: {values: consignerOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true}
+                },
+                {title: "Agent", field: "agent_name", widthGrow: 0.9, editor: canEdit ? "list" : false,
+                    editorParams: {values: agentOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true}
+                },
+                {title: "Pipeline", field: "pipeline_name", widthGrow: 0.9, editor: canEdit ? "list" : false,
+                    editorParams: {values: pipelineOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true}
+                },
+                {title: "Unload Terminal", field: "unload_terminal", widthGrow: 1, editor: canEdit ? "list" : false,
+                    editorParams: {values: terminalOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true}
                 },
                 canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 60, widthGrow: 0, hozAlign: "center", headerSort: false,
-                    cellClick: function(e, cell) { deleteSubRow('nominations', cell.getRow().getData().id, vcnId); }
+                    cellClick: function(e, cell) { deleteSubRow('consigners', cell.getRow().getData().id, vcnId); }
                 } : null
             ].filter(Boolean)
         });
-        if (isDark) document.querySelector(`#nominations-table-${vcnId}`).classList.add('tabulator-dark');
+        if (isDark) document.querySelector(`#consigners-table-${vcnId}`).classList.add('tabulator-dark');
 
         // Delays table
         subTables[vcnId].delays = new Tabulator(`#delays-table-${vcnId}`, {
@@ -1052,36 +1107,6 @@
                 ].filter(Boolean)
             });
             if (isDark) document.querySelector(`#export-cargo-table-${vcnId}`).classList.add('tabulator-dark');
-        } else {
-            subTables[vcnId].cargo = new Tabulator(`#cargo-table-${vcnId}`, {
-                layout: "fitColumns",
-                height: 150,
-                ajaxURL: `/api/module/VCN01/cargo/${vcnId}`,
-                columnDefaults: { headerSort: false },
-                cellEdited: () => markDirty('cargo'),
-                columns: [
-                    {title: "IGM Manual No", field: "igm_manual_number", widthGrow: 1, editor: canEdit ? "input" : false},
-                    {title: "IGM Date", field: "igm_date", widthGrow: 1, editor: canEdit ? dateEditor : false, formatter: dateCellFormatter},
-                    {title: "Cargo Name", field: "cargo_name", widthGrow: 1, editor: canEdit ? "list" : false,
-                        editorParams: {values: cargoOptions, autocomplete: true, allowEmpty: true}
-                    },
-                    {title: "Customer", field: "customer_name", widthGrow: 1, editor: canEdit ? "list" : false,
-                        editorParams: {values: customerOptions, autocomplete: true, allowEmpty: true}
-                    },
-                    {title: "BL No", field: "bl_no", widthGrow: 1, editor: canEdit ? "input" : false},
-                    {title: "BL Date", field: "bl_date", widthGrow: 1, editor: canEdit ? dateEditor : false, formatter: dateCellFormatter},
-                    {title: "BL Quantity", field: "bl_quantity", widthGrow: 1, editor: canEdit ? "number" : false, hozAlign: "right",
-                        editorParams: {min: 0, step: 0.01}
-                    },
-                    {title: "Quantity UOM", field: "quantity_uom", widthGrow: 1, editor: canEdit ? "list" : false,
-                        editorParams: {values: uomOptions, autocomplete: true, allowEmpty: true}
-                    },
-                    canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 60, widthGrow: 0, hozAlign: "center", headerSort: false,
-                        cellClick: function(e, cell) { deleteSubRow('cargo', cell.getRow().getData().id, vcnId); }
-                    } : null
-                ].filter(Boolean)
-            });
-            if (isDark) document.querySelector(`#cargo-table-${vcnId}`).classList.add('tabulator-dark');
         }
 
     }
@@ -1128,7 +1153,7 @@
         }
         if (data.id && subTables[vcnId] && subTables[vcnId][type]) {
             const newRow = {id: data.id, vcn_id: vcnId};
-            if ((type === 'cargo' || type === 'export_cargo') && defaultUom) {
+            if (type === 'export_cargo' && defaultUom) {
                 newRow.quantity_uom = defaultUom;
             }
             subTables[vcnId][type].addRow(newRow, false);
@@ -1385,7 +1410,6 @@
             vcn_doc_num:            { label: 'VCN Doc',        type: 'contains' },
             vessel_name:            { label: 'Vessel Name',    type: 'contains' },
             vessel_agent_name:      { label: 'Vessel Agent',   type: 'contains' },
-            importer_exporter_name: { label: 'Stevedore',      type: 'contains' },
             customer_name:          { label: 'Customer',       type: 'contains' },
             cargo_type:             { label: 'Cargo Type',     type: 'multi',    values: cargoTypes },
             load_port:              { label: 'Load Port',      type: 'contains' },

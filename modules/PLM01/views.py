@@ -35,6 +35,11 @@ def get_data():
     data, total = model.get_data(page, size)
     return jsonify({'data': data, 'last_page': (total + size - 1) // size, 'total': total})
 
+@bp.route('/api/module/PLM01/all')
+@login_required
+def get_all():
+    return jsonify([r['pipeline_name'] for r in model.get_all_active()])
+
 @bp.route('/api/module/PLM01/save', methods=['POST'])
 @login_required
 def save():

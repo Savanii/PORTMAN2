@@ -52,7 +52,7 @@ _MODULE_NAMES = {
     'PDM01': 'Port Delay Master', 'VCG01': 'Cargo Master',
     'VQM01': 'Quantity UOM', 'VHO01': 'Vessel Holds',
     'VEM01': 'Equipment Master', 'VBM01': 'Barge Master',
-    'VSDM01': 'Vessel Stevedore Master', 'MBCM01': 'MBC Master',
+    'MBCM01': 'MBC Master',
     'PBM01': 'Port Berth Master', 'PPL01': 'Port Payloader Master',
     'CRM01': 'Conveyor Route Master', 'VANM01': 'Anchorage Master',
     'VPM01': 'Port Master', 'TM01': 'Tide Master',

@@ -61,6 +61,7 @@ def delete():
 @bp.route('/api/module/EV01/upload', methods=['POST'])
 @login_required
 def upload_pdf():
+    """Parse the PDF and return a reconciliation preview — no DB writes."""
     perms = get_perms()
     if not perms.get('can_add') and not perms.get('can_edit'):
         return jsonify({'error': 'No permission'}), 403
@@ -73,8 +74,25 @@ def upload_pdf():
     rows = pdf_parser.parse_pdf_ev_rows(file_bytes)
     if not rows:
         return jsonify({'error': 'No Expected Vessels table found in PDF. Check the file format.'}), 400
-    result = model.upsert_from_pdf(rows, session.get('username'))
-    return jsonify({'success': True, 'total': len(rows), **result})
+    preview = model.preview_upsert(rows)
+    return jsonify({'success': True, 'total': len(rows), **preview})
+
+
+@bp.route('/api/module/EV01/upload/commit', methods=['POST'])
+@login_required
+def upload_commit():
+    """Apply the actions confirmed in the reconciliation wizard."""
+    perms = get_perms()
+    decisions = (request.json or {}).get('rows') or []
+    if not decisions:
+        return jsonify({'error': 'Nothing to import'}), 400
+    actions = {d.get('action') for d in decisions}
+    if 'insert' in actions and not perms.get('can_add'):
+        return jsonify({'error': 'No permission to add records'}), 403
+    if 'update' in actions and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission to edit records'}), 403
+    result = model.apply_upsert(decisions, session.get('username'))
+    return jsonify({'success': True, **result})
 
 
 @bp.route('/api/module/EV01/move_to_vcn/<int:ev_id>', methods=['POST'])
@@ -89,6 +107,7 @@ def move_to_vcn(ev_id):
     from modules.VCN01 import model as vcn_model
     vcn_data = {
         'doc_status':        'Draft',
+        'vessel_master_doc': model.get_vessel_master_doc(ev.get('vessel_name')),
         'vessel_name':       ev.get('vessel_name'),
         'loa':               ev.get('loa'),
         'draft':             ev.get('draft'),
@@ -99,5 +118,8 @@ def move_to_vcn(ev_id):
         'doc_date':          str(ev.get('eta').date()) if ev.get('eta') else None,
     }
     vcn_id, vcn_doc_num = vcn_model.save_header(vcn_data)
+    for row in model.build_consigner_rows(ev):
+        row['vcn_id'] = vcn_id
+        vcn_model.save_consigner(row)
     model.mark_moved_to_vcn(ev_id, vcn_id)
     return jsonify({'vcn_id': vcn_id, 'vcn_doc_num': vcn_doc_num})

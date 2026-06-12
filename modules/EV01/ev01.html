@@ -111,6 +111,39 @@
     </div>
 </div>
 
+<!-- PDF Import Reconciliation Wizard -->
+<div id="recoModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1001;overflow-y:auto;">
+    <div style="background:#fff;margin:30px auto;padding:24px 28px;border-radius:10px;max-width:1100px;position:relative;">
+        <button onclick="closeRecoModal()" style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:20px;cursor:pointer;">&times;</button>
+        <h3 style="margin:0 0 6px;">Import Preview — Expected Vessels</h3>
+        <div id="recoSummary" style="margin-bottom:14px;color:#555;font-size:13px;"></div>
+        <div style="max-height:60vh;overflow:auto;border:1px solid #e0e0e0;border-radius:6px;">
+            <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                <thead>
+                    <tr style="background:#f5f6fa;position:sticky;top:0;">
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">#</th>
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">Status</th>
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">Vessel</th>
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">VIA No.</th>
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">ETA</th>
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">Cargo</th>
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">Details / Changes</th>
+                        <th style="padding:7px 8px;text-align:left;border-bottom:1px solid #ddd;">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="recoBody"></tbody>
+            </table>
+        </div>
+        <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;">
+            <span id="recoFooterNote" style="font-size:12px;color:#888;"></span>
+            <div>
+                <button type="button" onclick="closeRecoModal()" style="padding:8px 20px;margin-right:10px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#f5f5f5;">Cancel</button>
+                <button type="button" id="recoConfirmBtn" onclick="confirmRecoImport()" class="btn btn-save" style="padding:8px 20px;">Confirm Import</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div id="table"></div>
 {% endblock %}
 
@@ -334,6 +367,8 @@
         table.setData('/api/module/EV01/data');
     }
 
+    let recoRows = [];   // preview rows held between upload and confirm
+
     async function uploadPdf(input) {
         const file = input.files[0];
         if (!file) return;
@@ -341,15 +376,14 @@
         const fd = new FormData();
         fd.append('file', file);
         const btn = document.querySelector('button[onclick*="pdfInput"]');
-        if (btn) btn.textContent = '⏳ Uploading...';
+        if (btn) btn.textContent = '⏳ Analysing...';
         try {
             const res = await fetch('/api/module/EV01/upload', {method: 'POST', body: fd});
             const result = await res.json();
             if (result.error) {
                 alert('Upload failed: ' + result.error);
             } else {
-                alert(`PDF imported successfully!\nTotal rows: ${result.total}  |  Inserted: ${result.inserted}  |  Updated: ${result.updated}`);
-                table.setData('/api/module/EV01/data');
+                openRecoModal(result);
             }
         } catch(e) {
             alert('Upload error: ' + e.message);
@@ -358,8 +392,117 @@
         }
     }
 
+    const RECO_BADGE = {
+        new:       ['New',       '#1e8449', '#d4efdf'],
+        update:    ['Update',    '#1a6fa8', '#dbeeff'],
+        conflict:  ['Conflict',  '#b03a2e', '#fde8e8'],
+        duplicate: ['Duplicate', '#b7770d', '#fef3cd'],
+    };
+
+    const FIELD_LABELS = {
+        terminal_name:'Terminal', vessel_name:'Vessel', via_number:'VIA No.', loa:'LOA',
+        draft:'DFT', agents:'Agents', tanks:'Tanks', consignees:'Consignees',
+        cargo_name:'Cargo', mla:'MLA', quantity:'Qty', ddp:'DDP', dop:'DOP',
+        eta:'ETA', ata:'ATA', lpc:'LPC', doc:'DOC', nor:'NOR', berth_name:'Berth'
+    };
+
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+            ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function recoActionOptions(row) {
+        const opts = [];
+        if (row.status === 'new')            opts.push(['insert', 'Insert']);
+        if (row.status === 'update')         { opts.push(['update', 'Update']); opts.push(['insert', 'Insert as new']); }
+        if (row.status === 'conflict') {
+            opts.push(['insert', 'Insert as new']);
+            if (row.match_id) opts.push(['update', 'Overwrite existing']);
+        }
+        if (row.status === 'duplicate')      opts.push(['insert', 'Insert anyway']);
+        opts.push(['skip', 'Skip']);
+        return opts;
+    }
+
+    function openRecoModal(result) {
+        recoRows = result.rows || [];
+        const s = result.summary || {};
+        document.getElementById('recoSummary').innerHTML =
+            `Parsed <b>${result.total}</b> rows &mdash; ` +
+            `<span style="color:#1e8449;">${s.new || 0} new</span>, ` +
+            `<span style="color:#1a6fa8;">${s.update || 0} updates</span>, ` +
+            `<span style="color:#b03a2e;">${s.conflict || 0} conflicts</span>, ` +
+            `<span style="color:#b7770d;">${s.duplicate || 0} duplicates</span>. ` +
+            `Records are matched by VIA No., or vessel name when the VIA is not yet assigned.`;
+
+        const body = document.getElementById('recoBody');
+        body.innerHTML = recoRows.map((row, i) => {
+            const d = row.data || {};
+            const [label, fg, bg] = RECO_BADGE[row.status] || ['?', '#555', '#eee'];
+            let detail = '';
+            if (row.status === 'update' && Object.keys(row.changes || {}).length) {
+                detail = Object.entries(row.changes).map(([k, c]) =>
+                    `<div><b>${esc(FIELD_LABELS[k] || k)}:</b> <span style="color:#b03a2e;text-decoration:line-through;">${esc(c.old ?? '—')}</span> → <span style="color:#1e8449;">${esc(c.new)}</span></div>`
+                ).join('');
+                detail = `<div style="font-size:11px;">Matches record #${row.existing.id}${row.existing.doc_status === 'Moved to VCN' ? ' <b style="color:#b7770d;">(already Moved to VCN)</b>' : ''}</div>` + detail;
+            } else if (row.reason) {
+                detail = `<span style="color:#888;">${esc(row.reason)}</span>`;
+            }
+            if (row.in_vessel_master === false && row.action !== 'skip') {
+                detail += `<div style="color:#7d3c98;font-size:11px;">＋ Will be added to Vessel Master (VC01)</div>`;
+            }
+            const sel = recoActionOptions(row).map(([v, t]) =>
+                `<option value="${v}" ${v === row.action ? 'selected' : ''}>${t}</option>`).join('');
+            return `<tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px 8px;vertical-align:top;">${i + 1}</td>
+                <td style="padding:6px 8px;vertical-align:top;"><span style="background:${bg};border:1px solid ${fg};color:${fg};padding:1px 8px;border-radius:10px;font-size:11px;white-space:nowrap;">${label}</span></td>
+                <td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">${esc(d.vessel_name)}</td>
+                <td style="padding:6px 8px;vertical-align:top;">${esc(d.via_number || '—')}</td>
+                <td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">${esc(d.eta || '')}</td>
+                <td style="padding:6px 8px;vertical-align:top;">${esc(d.cargo_name || '')}</td>
+                <td style="padding:6px 8px;vertical-align:top;max-width:320px;">${detail}</td>
+                <td style="padding:6px 8px;vertical-align:top;"><select id="recoAction${i}" style="padding:3px 6px;border:1px solid #ccc;border-radius:4px;">${sel}</select></td>
+            </tr>`;
+        }).join('');
+
+        document.getElementById('recoFooterNote').textContent =
+            'Nothing is saved until you click Confirm Import.';
+        document.getElementById('recoModal').style.display = 'block';
+    }
+
+    function closeRecoModal() {
+        document.getElementById('recoModal').style.display = 'none';
+        recoRows = [];
+    }
+
+    async function confirmRecoImport() {
+        const payload = recoRows.map((row, i) => ({
+            action: document.getElementById('recoAction' + i).value,
+            match_id: row.match_id,
+            data: row.data
+        }));
+        const btn = document.getElementById('recoConfirmBtn');
+        btn.disabled = true; btn.textContent = '⏳ Importing...';
+        try {
+            const res = await fetch('/api/module/EV01/upload/commit', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: payload})
+            });
+            const result = await res.json();
+            if (result.error) { alert('Import failed: ' + result.error); return; }
+            closeRecoModal();
+            alert(`Import complete!\nInserted: ${result.inserted}  |  Updated: ${result.updated}  |  Skipped: ${result.skipped}`);
+            table.setData('/api/module/EV01/data');
+        } catch(e) {
+            alert('Import error: ' + e.message);
+        } finally {
+            btn.disabled = false; btn.textContent = 'Confirm Import';
+        }
+    }
+
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') closeModal();
+        if (e.key === 'Escape') { closeModal(); closeRecoModal(); }
     });
 
     initTable();

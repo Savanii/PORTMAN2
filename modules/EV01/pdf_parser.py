@@ -38,11 +38,22 @@ def _parse_dt(s):
     return None
 
 
+def _num(s):
+    """Sanitize numeric cell: handles European decimals ('8,00') and stray text."""
+    s = _clean(s)
+    if not s:
+        return None
+    s = s.replace(',', '.')
+    m = re.search(r'\d+(?:\.\d+)?', s)
+    return m.group(0) if m else None
+
+
 def _split_codes(raw):
     """Return comma-joined list of trimmed non-empty codes, or None."""
     if not raw:
         return None
-    codes = [c.strip() for c in raw.split('+') if c.strip() and c.strip() not in ('---', '-', 'N/A')]
+    codes = [c.strip() for c in raw.split('+')
+             if c.strip() and c.strip() != 'N/A' and not re.fullmatch(r'-+', c.strip())]
     return ','.join(codes) if codes else None
 
 
@@ -134,8 +145,8 @@ def parse_pdf_ev_rows(file_bytes):
                         'terminal_name': g('terminal'),
                         'vessel_name':   vessel_name,
                         'via_number':    g('via'),
-                        'loa':           g('loa'),
-                        'draft':         g('dft'),
+                        'loa':           _num(g('loa')),
+                        'draft':         _num(g('dft')),
                         'agents':        agents,
                         'tanks':         tanks,
                         'consignees':    consignees,

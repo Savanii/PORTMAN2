@@ -483,10 +483,8 @@
     let moduleConfig = {};
     let vcnList = [];
     let delayTypes = [];
-    let contractorList = [];
     let cargoNames = [];
     let anchorageNames = [];
-    let payloaderList = [];
     let holdMasterList = [];
     let equipmentList = [];
     let subTables = {};
@@ -606,23 +604,19 @@
     }
 
     async function loadMasterData() {
-        const [vcnRes, delayRes, contractorRes, cargoRes, ancRes, pplRes, holdsRes, equipRes, configRes] = await Promise.all([
+        const [vcnRes, delayRes, cargoRes, ancRes, holdsRes, equipRes, configRes] = await Promise.all([
             fetch('/api/module/LDUD01/vcn_list'),
             fetch('/api/module/VDM01/all'),
-            fetch('/api/module/VSDM01/all'),
             fetch('/api/module/VCG01/names'),
             fetch('/api/module/VANM01/all'),
-            fetch('/api/module/PPL01/all'),
             fetch('/api/module/VHO01/all'),
             fetch('/api/module/VEM01/all'),
             fetch('/admin/api/config/LDUD01')
         ]);
         vcnList = await vcnRes.json();
         delayTypes = await delayRes.json();
-        contractorList = await contractorRes.json();
         cargoNames = await cargoRes.json();
         anchorageNames = await ancRes.json();
-        payloaderList = await pplRes.json();
         holdMasterList = await holdsRes.json();
         equipmentList = await equipRes.json();
         moduleConfig = await configRes.json();
@@ -1338,8 +1332,13 @@
         stowageHoldMeta[ldudId] = {};
         vesselOpsHoldFields[ldudId] = [];
         if (vcnId) {
-            const stowageRes = await fetch(`/api/module/VCN01/stowage/${vcnId}`);
-            const stowageData = await stowageRes.json();
+            // Stowage plan was removed from VCN01 for JNPA (liquid berths) —
+            // tolerate a missing endpoint and fall back to no holds.
+            let stowageData = [];
+            try {
+                const stowageRes = await fetch(`/api/module/VCN01/stowage/${vcnId}`);
+                if (stowageRes.ok) stowageData = await stowageRes.json();
+            } catch (e) { /* no stowage source — keep empty */ }
             stowagePlanData[ldudId] = stowageData;
 
             // Build unique holds with their total quantities
@@ -1416,9 +1415,6 @@
 
         const delayOptions = {};
         delayTypes.forEach(d => { delayOptions[d] = d; });
-
-        const contractorOptions = {};
-        contractorList.forEach(c => { contractorOptions[c] = c; });
 
         // Restrict cargo dropdown to cargos on this LDUD record; fall back to full master if none
         const _mainRowData = mainRow ? mainRow.getData() : {};
