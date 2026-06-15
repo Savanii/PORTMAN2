@@ -142,6 +142,19 @@ def delete():
 def get_consigners(vcn_id):
     return jsonify(model.get_consigners(vcn_id))
 
+@bp.route('/api/module/VCN01/parcels/<int:vcn_id>')
+@login_required
+def get_parcels(vcn_id):
+    """Compact parcel list for cross-module pickers (e.g. LDUD unloading)."""
+    parcels = [{
+        'id': p['id'],
+        'parcel_no': p.get('parcel_no'),
+        'cargo_name': p.get('cargo_name'),
+        'consigner_name': p.get('consigner_name'),
+        'quantity': p.get('quantity'),
+    } for p in model.get_parcels(vcn_id)]
+    return jsonify(parcels)
+
 @bp.route('/api/module/VCN01/consigners/save', methods=['POST'])
 @login_required
 def save_consigner():
