@@ -109,21 +109,34 @@ def delete_header(row_id):
     conn.commit()
     conn.close()
 
-# Consigner (customer details) sub-table — one row per IGM (FORM III) line
-# vessel agent is captured on the header (vessel_agent_name), not per line
+# Consigner (customer details) sub-table — each row is one PARCEL (one IGM/FORM III
+# line: product + receiver + BL). vessel agent is captured on the header.
 _CONSIGNER_COLS = ['igm_line_no', 'bl_no', 'bl_date', 'cargo_name', 'quantity',
                    'consigner_name', 'importer_name',
                    'pipeline_name', 'unload_terminal']
 
-def get_consigners(vcn_id):
+
+def _parcel_no(cur, vcn_id, seq):
+    """Build the stored parcel label '<vcn_doc_num>/P<seq>' (or 'P<seq>' if the
+    parent VCN has no doc number yet — e.g. a brand-new draft)."""
+    cur.execute('SELECT vcn_doc_num FROM vcn_header WHERE id=%s', [vcn_id])
+    row = cur.fetchone()
+    doc = (row or {}).get('vcn_doc_num') if row else None
+    return f"{doc}/P{seq}" if doc else f"P{seq}"
+
+
+def get_parcels(vcn_id):
     conn = get_db()
     cur = get_cursor(conn)
-    # igm_line_no is free text ('1', '1 - 4', '4-7') — sort by its leading number
-    cur.execute('''SELECT * FROM vcn_consigners WHERE vcn_id=%s
-                   ORDER BY (substring(igm_line_no from '^[0-9]+'))::int NULLS LAST, id''', (vcn_id,))
+    cur.execute('SELECT * FROM vcn_consigners WHERE vcn_id=%s ORDER BY parcel_seq NULLS LAST, id',
+                (vcn_id,))
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+# back-compat alias — existing callers/endpoints use get_consigners
+get_consigners = get_parcels
+
 
 def save_consigner(data):
     _clean_empty(data)
@@ -133,14 +146,29 @@ def save_consigner(data):
         cur.execute(f"UPDATE vcn_consigners SET {', '.join(f'{c}=%s' for c in _CONSIGNER_COLS)} WHERE id=%s",
                    [data.get(c) for c in _CONSIGNER_COLS] + [data['id']])
         row_id = data['id']
+        # backfill parcel_no if it was created on a draft before the VCN had a doc number
+        cur.execute('SELECT parcel_seq, parcel_no FROM vcn_consigners WHERE id=%s', [row_id])
+        cur_row = cur.fetchone()
+        if cur_row and cur_row['parcel_seq'] and not cur_row['parcel_no']:
+            cur.execute('UPDATE vcn_consigners SET parcel_no=%s WHERE id=%s',
+                        [_parcel_no(cur, data['vcn_id'], cur_row['parcel_seq']), row_id])
     else:
-        cur.execute(f'''INSERT INTO vcn_consigners (vcn_id, {', '.join(_CONSIGNER_COLS)})
-                       VALUES ({', '.join(['%s'] * (len(_CONSIGNER_COLS) + 1))}) RETURNING id''',
-                   [data['vcn_id']] + [data.get(c) for c in _CONSIGNER_COLS])
+        cur.execute('SELECT COALESCE(MAX(parcel_seq), 0) + 1 AS nxt FROM vcn_consigners WHERE vcn_id=%s',
+                    [data['vcn_id']])
+        seq = cur.fetchone()['nxt']
+        parcel_no = _parcel_no(cur, data['vcn_id'], seq)
+        cols = _CONSIGNER_COLS + ['parcel_seq', 'parcel_no']
+        vals = [data.get(c) for c in _CONSIGNER_COLS] + [seq, parcel_no]
+        cur.execute(f'''INSERT INTO vcn_consigners (vcn_id, {', '.join(cols)})
+                       VALUES ({', '.join(['%s'] * (len(cols) + 1))}) RETURNING id''',
+                   [data['vcn_id']] + vals)
         row_id = cur.fetchone()['id']
     conn.commit()
     conn.close()
     return row_id
+
+# back-compat alias
+save_parcel = save_consigner
 
 def save_igm_document(vcn_id, filename, file_bytes):
     conn = get_db()
