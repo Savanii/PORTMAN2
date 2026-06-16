@@ -124,9 +124,8 @@
         <p style="margin:0 0 16px;font-size:12px;color:#718096;">The vessel will be closed here and will not come to VCN.</p>
         <input type="hidden" id="tmEvId">
         <label style="font-size:13px;">Terminal</label>
-        <select id="tmTerminal" style="width:100%;padding:7px 8px;border:1px solid #ccc;border-radius:4px;margin-top:4px;">
-            <option value="">-- Select Terminal --</option>
-        </select>
+        <input type="text" id="tmTerminal" list="tmTerminalList" placeholder="Enter terminal name" style="width:100%;padding:7px 8px;border:1px solid #ccc;border-radius:4px;margin-top:4px;">
+        <datalist id="tmTerminalList"></datalist>
         <div style="margin-top:20px;text-align:right;">
             <button type="button" onclick="closeTerminalModal()" style="padding:7px 18px;margin-right:8px;border:1px solid #cbd5e0;border-radius:4px;cursor:pointer;background:#f7fafc;">Cancel</button>
             <button type="button" onclick="confirmMoveToTerminal()" class="btn btn-save" style="padding:7px 18px;">Close Vessel</button>
@@ -181,19 +180,20 @@
             const res = await fetch('/api/module/TRM01/all');
             terminalNames = await res.json();
         } catch (e) { terminalNames = []; }
-        const opts = terminalNames.map(t => `<option value="${t}">${t}</option>`).join('');
-        ['fTerminal', 'tmTerminal'].forEach(idAttr => {
-            const sel = document.getElementById(idAttr);
-            if (sel) sel.innerHTML = sel.querySelector('option').outerHTML + opts;
-        });
+        const sel = document.getElementById('fTerminal');
+        if (sel) sel.innerHTML = sel.querySelector('option').outerHTML +
+            terminalNames.map(t => `<option value="${t}">${t}</option>`).join('');
     }
 
     function openTerminalModal(id) {
         const row = table.getRows().find(r => r.getData().id === id);
         document.getElementById('tmEvId').value = id;
-        const sel = document.getElementById('tmTerminal');
-        // preselect the vessel's current terminal if it's in the list
-        sel.value = (row && terminalNames.includes(row.getData().terminal_name)) ? row.getData().terminal_name : '';
+        // free-text input; offer previously-used terminals (incl. master) as suggestions
+        const seen = new Set(terminalNames);
+        table.getData().forEach(r => { if (r.terminal_name) seen.add(r.terminal_name); });
+        document.getElementById('tmTerminalList').innerHTML =
+            [...seen].map(t => `<option value="${t}"></option>`).join('');
+        document.getElementById('tmTerminal').value = (row && row.getData().terminal_name) || '';
         document.getElementById('terminalModal').style.display = 'flex';
     }
 
