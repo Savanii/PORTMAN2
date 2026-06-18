@@ -64,7 +64,6 @@ from modules.LDUD01 import bp as ldud01_bp, MODULE_INFO as ldud01_info
 from modules.PBM01 import bp as pbm01_bp, MODULE_INFO as pbm01_info
 from modules.INVDS01 import bp as invds01_bp, MODULE_INFO as invds01_info
 from modules.LUEU01 import bp as eu01_bp, MODULE_INFO as eu01_info
-from modules.CRM01 import bp as crm01_bp, MODULE_INFO as crm01_info
 
 # Import finance modules
 from modules.FCRM01 import bp as fcrm01_bp, MODULE_INFO as fcrm01_info
@@ -76,7 +75,6 @@ from modules.SRV01 import bp as srv01_bp, MODULE_INFO as srv01_info
 from modules.VANM01 import bp as vanm01_bp, MODULE_INFO as vanm01_info
 from modules.VPM01 import bp as vpm01_bp, MODULE_INFO as vpm01_info
 from modules.TM01 import bp as tm01_bp, MODULE_INFO as tm01_info
-from modules.PSM01 import bp as psm01_bp, MODULE_INFO as psm01_info
 from modules.PSMM01 import bp as psmm01_bp, MODULE_INFO as psmm01_info
 from modules.PSOM01 import bp as psom01_bp, MODULE_INFO as psom01_info
 
@@ -125,7 +123,6 @@ register_module(ldud01_info['code'], ldud01_info['name'], ldud01_bp)
 register_module(pbm01_info['code'], pbm01_info['name'], pbm01_bp)
 register_module(invds01_info['code'], invds01_info['name'], invds01_bp)
 register_module(eu01_info['code'], eu01_info['name'], eu01_bp)
-register_module(crm01_info['code'], crm01_info['name'], crm01_bp)
 # Register finance modules
 register_module(fcrm01_info['code'], fcrm01_info['name'], fcrm01_bp)
 register_module(fgrm01_info['code'], fgrm01_info['name'], fgrm01_bp)
@@ -136,7 +133,6 @@ register_module(srv01_info['code'], srv01_info['name'], srv01_bp)
 register_module(vanm01_info['code'], vanm01_info['name'], vanm01_bp)
 register_module(vpm01_info['code'], vpm01_info['name'], vpm01_bp)
 register_module(tm01_info['code'], tm01_info['name'], tm01_bp)
-register_module(psm01_info['code'], psm01_info['name'], psm01_bp)
 register_module(psmm01_info['code'], psmm01_info['name'], psmm01_bp)
 register_module(psom01_info['code'], psom01_info['name'], psom01_bp)
 
