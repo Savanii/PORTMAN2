@@ -11,7 +11,6 @@ def get_next_doc_num():
     import datetime
     conn = get_db()
     cur = get_cursor(conn)
-    yy = datetime.datetime.now().strftime('%y%y')  # e.g. 2626 for FY2026
     # Use financial year suffix: FY starting April, so Mar→prev year pair
     now = datetime.datetime.now()
     fy_start = now.year if now.month >= 4 else now.year - 1
@@ -93,13 +92,10 @@ def get_data(page=1, size=20, filters=None):
 
         # Collect vcn_ids to batch-fetch computed fields
         vcn_ids = list(set(r['vcn_id'] for r in rows if r.get('vcn_id')))
-        ldud_ids = [r['id'] for r in rows if r.get('id')]
 
         vcn_cargo = {}   # vcn_id -> {cargo_names, bl_quantities}
         vcn_agents = {}  # vcn_id -> {agent_name, stevedore_name}
         vcn_meta = {}    # vcn_id -> {doc_date}
-        vo_by_cargo = {} # ldud_id -> {cargo_name: total_qty}
-        vo_times = {}    # ldud_id -> {first_start, last_end}
 
         if vcn_ids:
             # Fetch doc_date for display
@@ -152,36 +148,9 @@ def get_data(page=1, size=20, filters=None):
                     'stevedore_name': v['importer_exporter_name']
                 }
 
-        if ldud_ids:
-            # Quantity from vessel_operations per ldud, grouped by cargo_name
-            cur.execute('''SELECT ldud_id, cargo_name, SUM(quantity) as total_qty
-                           FROM ldud_vessel_operations WHERE ldud_id = ANY(%s)
-                           GROUP BY ldud_id, cargo_name''', (ldud_ids,))
-            for v in cur.fetchall():
-                lid = v['ldud_id']
-                if lid not in vo_by_cargo:
-                    vo_by_cargo[lid] = {}
-                cn = v['cargo_name'] or ''
-                vo_by_cargo[lid][cn] = float(v['total_qty'] or 0)
-
-            # Earliest discharge_started and latest discharge_commenced from anchorage recording.
-            # ops_completed is NULL if any anchorage is started but not yet completed.
-            cur.execute('''SELECT ldud_id,
-                               MIN(discharge_started) as first_start,
-                               MAX(discharge_commenced) as last_end,
-                               BOOL_OR(discharge_started IS NOT NULL AND discharge_commenced IS NULL) as has_open
-                           FROM ldud_anchorage WHERE ldud_id = ANY(%s)
-                           GROUP BY ldud_id''', (ldud_ids,))
-            for v in cur.fetchall():
-                vo_times[v['ldud_id']] = {
-                    'first_start': str(v['first_start']).replace(' ', 'T') if v['first_start'] else None,
-                    'last_end': None if v['has_open'] else (str(v['last_end']).replace(' ', 'T') if v['last_end'] else None)
-                }
-
         # Enrich rows
         for r in rows:
             vid = r.get('vcn_id')
-            lid = r.get('id')
 
             # Cargo info from VCN
             ci = vcn_cargo.get(vid, {'names': [], 'quantities': [], 'uoms': []})
@@ -193,17 +162,6 @@ def get_data(page=1, size=20, filters=None):
                 bl_parts.append(f"{int(round(q))} {uom}".strip())
             r['bl_quantities_display'] = ', '.join(bl_parts) if bl_parts else ''
 
-            # Per-cargo balance: BL qty - ops qty for each cargo
-            cargo_ops = vo_by_cargo.get(lid, {})
-            balances = []
-            for i, name in enumerate(ci['names']):
-                bl_qty = ci['quantities'][i]
-                ops_qty = cargo_ops.get(name, 0)
-                uom = uoms[i] if i < len(uoms) else ''
-                bal = int(round(bl_qty - ops_qty))
-                balances.append(f"{bal} {uom}".strip())
-            r['balance_display'] = ', '.join(balances) if balances else ''
-
             # VCN doc date for display
             vm = vcn_meta.get(vid, {})
             r['vcn_doc_date'] = vm.get('doc_date', '')
@@ -213,11 +171,6 @@ def get_data(page=1, size=20, filters=None):
             ai = vcn_agents.get(vid, {})
             r['agent_name'] = ai.get('agent_name', '')
             r['stevedore_name'] = ai.get('stevedore_name', '')
-
-            # Discharge/Loading Started and Completed from vessel_operations
-            vt = vo_times.get(lid, {})
-            r['ops_started'] = vt.get('first_start')
-            r['ops_completed'] = vt.get('last_end')
 
         return rows, total
     finally:
@@ -259,184 +212,81 @@ def delete_header(row_id):
     conn.commit()
     conn.close()
 
-# Delays sub-table operations
-def get_delays(ldud_id):
+
+# Parcel Operations sub-table — each row covers one VCN parcel, or several
+# parcels MERGED together (only allowed when they share the same cargo name).
+# parcel_ids is a CSV of parcel ids: vcn_consigners.id for Import LDUDs,
+# vcn_export_cargo_declaration.id for Export LDUDs (resolved via the linked
+# VCN's operation_type — one LDUD is one VCN of one operation type).
+def _parse_ids(csv):
+    return [int(x) for x in str(csv or '').split(',') if str(x).strip().isdigit()]
+
+
+def _parcel_table_for_ldud(cur, ldud_id):
+    """Return the VCN parcel source table for this LDUD based on operation_type."""
+    cur.execute('''SELECT h.operation_type
+                   FROM ldud_header l JOIN vcn_header h ON h.id = l.vcn_id
+                   WHERE l.id=%s''', [ldud_id])
+    row = cur.fetchone()
+    op = (row or {}).get('operation_type') if row else None
+    return 'vcn_export_cargo_declaration' if op == 'Export' else 'vcn_consigners'
+
+
+def get_parcel_ops(ldud_id):
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('SELECT * FROM ldud_delays WHERE ldud_id=%s ORDER BY id DESC', (ldud_id,))
-    rows = cur.fetchall()
+    tbl = _parcel_table_for_ldud(cur, ldud_id)
+    cur.execute('SELECT * FROM ldud_parcel_ops WHERE ldud_id=%s ORDER BY id', (ldud_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    # Resolve parcel labels for display from the correct source table
+    all_ids = sorted({pid for r in rows for pid in _parse_ids(r['parcel_ids'])})
+    labels = {}
+    if all_ids:
+        cur.execute(f'SELECT id, parcel_no FROM {tbl} WHERE id = ANY(%s)', (all_ids,))
+        labels = {r['id']: (r['parcel_no'] or f"#{r['id']}") for r in cur.fetchall()}
     conn.close()
-    return [dict(r) for r in rows]
+    for r in rows:
+        ids = _parse_ids(r['parcel_ids'])
+        r['parcel_nos_display'] = ', '.join(labels.get(i, f"#{i}") for i in ids)
+    return rows
 
-def save_delay(data):
+
+def save_parcel_op(data):
     _clean_empty(data)
+    ids = _parse_ids(data.get('parcel_ids'))
     conn = get_db()
     cur = get_cursor(conn)
-
-    # Calculate total time
-    total_mins = None
-    total_hrs = None
-    if data.get('start_datetime') and data.get('end_datetime'):
-        from datetime import datetime
-        try:
-            start = datetime.fromisoformat(data['start_datetime'])
-            end = datetime.fromisoformat(data['end_datetime'])
-            diff = (end - start).total_seconds()
-            total_mins = round(diff / 60, 2)
-            total_hrs = round(diff / 3600, 2)
-        except:
-            pass
-
+    tbl = _parcel_table_for_ldud(cur, data['ldud_id'])
+    # Guard: merged parcels must share a single cargo name
+    cargo_name = data.get('cargo_name')
+    if len(ids) > 1:
+        cur.execute(f'SELECT DISTINCT cargo_name FROM {tbl} WHERE id = ANY(%s)', (ids,))
+        cargos = [r['cargo_name'] for r in cur.fetchall()]
+        if len(set(cargos)) > 1:
+            conn.close()
+            raise ValueError('Cannot merge parcels with different cargo names: ' + ', '.join(map(str, cargos)))
+        cargo_name = cargos[0] if cargos else cargo_name
+    parcel_ids = ','.join(map(str, ids)) if ids else None
     if data.get('id'):
-        cur.execute('''UPDATE ldud_delays SET delay_name=%s,
-                      start_datetime=%s, end_datetime=%s, total_time_mins=%s, total_time_hrs=%s,
-                      minus_delay_hours=%s, crane_number=%s WHERE id=%s''',
-                   [data.get('delay_name'),
-                    data.get('start_datetime'), data.get('end_datetime'), total_mins, total_hrs,
-                    data.get('minus_delay_hours'), data.get('crane_number'), data['id']])
+        cur.execute('''UPDATE ldud_parcel_ops SET parcel_ids=%s, cargo_name=%s, start_dt=%s, end_dt=%s WHERE id=%s''',
+                   [parcel_ids, cargo_name, data.get('start_dt'), data.get('end_dt'), data['id']])
         row_id = data['id']
     else:
-        cur.execute('''INSERT INTO ldud_delays (ldud_id, delay_name,
-                      start_datetime, end_datetime, total_time_mins, total_time_hrs, minus_delay_hours, crane_number)
-                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-                   [data['ldud_id'], data.get('delay_name'),
-                    data.get('start_datetime'), data.get('end_datetime'), total_mins, total_hrs,
-                    data.get('minus_delay_hours'), data.get('crane_number')])
-        row_id = cur.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return row_id, total_mins, total_hrs
-
-def delete_delay(row_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('DELETE FROM ldud_delays WHERE id=%s', (row_id,))
-    conn.commit()
-    conn.close()
-
-# Anchorage Recording sub-table operations
-def get_anchorage(ldud_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('SELECT * FROM ldud_anchorage WHERE ldud_id=%s ORDER BY id DESC', (ldud_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-def save_anchorage(data):
-    _clean_empty(data)
-    conn = get_db()
-    cur = get_cursor(conn)
-    if data.get('id'):
-        cur.execute('''UPDATE ldud_anchorage SET anchorage_name=%s, anchored=%s, discharge_started=%s,
-                      discharge_commenced=%s, anchor_aweigh=%s, cargo_quantity=%s, cargo_name=%s WHERE id=%s''',
-                   [data.get('anchorage_name'), data.get('anchored'), data.get('discharge_started'),
-                    data.get('discharge_commenced'), data.get('anchor_aweigh'), data.get('cargo_quantity'),
-                    data.get('cargo_name'), data['id']])
-        row_id = data['id']
-    else:
-        cur.execute('''INSERT INTO ldud_anchorage (ldud_id, anchorage_name, anchored, discharge_started,
-                      discharge_commenced, anchor_aweigh, cargo_quantity, cargo_name)
-                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-                   [data['ldud_id'], data.get('anchorage_name'), data.get('anchored'), data.get('discharge_started'),
-                    data.get('discharge_commenced'), data.get('anchor_aweigh'), data.get('cargo_quantity'),
-                    data.get('cargo_name')])
-        row_id = cur.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return row_id
-
-def delete_anchorage(row_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('DELETE FROM ldud_anchorage WHERE id=%s', (row_id,))
-    conn.commit()
-    conn.close()
-
-
-# Vessel Operations sub-table operations
-def get_vessel_operations(ldud_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('SELECT * FROM ldud_vessel_operations WHERE ldud_id=%s ORDER BY id DESC', (ldud_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def save_vessel_operation(data):
-    _clean_empty(data)
-    conn = get_db()
-    cur = get_cursor(conn)
-    if data.get('id'):
-        cur.execute('''UPDATE ldud_vessel_operations SET hold_name=%s, start_time=%s, end_time=%s,
-                      cargo_name=%s, quantity=%s, parcel_id=%s WHERE id=%s''',
-                   [data.get('hold_name'), data.get('start_time'), data.get('end_time'),
-                    data.get('cargo_name'), data.get('quantity'), data.get('parcel_id'), data['id']])
-        row_id = data['id']
-    else:
-        cur.execute('''INSERT INTO ldud_vessel_operations (ldud_id, hold_name, start_time, end_time, cargo_name, quantity, parcel_id)
-                      VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-                   [data['ldud_id'], data.get('hold_name'), data.get('start_time'), data.get('end_time'),
-                    data.get('cargo_name'), data.get('quantity'), data.get('parcel_id')])
+        cur.execute('''INSERT INTO ldud_parcel_ops (ldud_id, parcel_ids, cargo_name, start_dt, end_dt)
+                      VALUES (%s, %s, %s, %s, %s) RETURNING id''',
+                   [data['ldud_id'], parcel_ids, cargo_name, data.get('start_dt'), data.get('end_dt')])
         row_id = cur.fetchone()['id']
     conn.commit()
     conn.close()
     return row_id
 
 
-def delete_vessel_operation(row_id):
+def delete_parcel_op(row_id):
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('DELETE FROM ldud_vessel_operations WHERE id=%s', (row_id,))
+    cur.execute('DELETE FROM ldud_parcel_ops WHERE id=%s', (row_id,))
     conn.commit()
     conn.close()
-
-
-# Hold Completion sub-table operations
-def get_hold_completion(ldud_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('SELECT * FROM ldud_hold_completion WHERE ldud_id=%s ORDER BY id ASC', (ldud_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def save_hold_completion(data):
-    _clean_empty(data)
-    conn = get_db()
-    cur = get_cursor(conn)
-    if data.get('id'):
-        cur.execute('''UPDATE ldud_hold_completion SET hold_name=%s, commenced=%s, completed=%s WHERE id=%s''',
-                   [data.get('hold_name'), data.get('commenced'), data.get('completed'), data['id']])
-        row_id = data['id']
-    else:
-        cur.execute('''INSERT INTO ldud_hold_completion (ldud_id, hold_name, commenced, completed)
-                      VALUES (%s, %s, %s, %s) RETURNING id''',
-                   [data['ldud_id'], data.get('hold_name'), data.get('commenced'), data.get('completed')])
-        row_id = cur.fetchone()['id']
-    conn.commit()
-    conn.close()
-    return row_id
-
-
-def delete_hold_completion(row_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('DELETE FROM ldud_hold_completion WHERE id=%s', (row_id,))
-    conn.commit()
-    conn.close()
-
-
-# Hold Cargo Config operations
-def get_hold_cargo(ldud_id):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('SELECT hold_name, cargo_name FROM ldud_hold_cargo WHERE ldud_id=%s', (ldud_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return {r['hold_name']: r['cargo_name'] or '' for r in rows}
 
 
 # Closure functions
@@ -450,12 +300,15 @@ def get_doc_status(record_id):
 
 
 def get_closure_eligibility(ldud_id):
-    """Check all closure prerequisites and return eligibility info."""
+    """Minimal closure gate: vessel name + NOR tendered.
+    (≥1 proof-of-quantity document is enforced separately in the view.)
+    Full vs Partial close is chosen manually — can_full_close mirrors eligible.
+    ops_total/bl_total kept at 0 for response-shape compatibility."""
     conn = get_db()
     cur = get_cursor(conn)
     missing = []
 
-    cur.execute('SELECT vessel_name, nor_tendered, vcn_id, operation_type FROM ldud_header WHERE id=%s', (ldud_id,))
+    cur.execute('SELECT vessel_name, nor_tendered FROM ldud_header WHERE id=%s', (ldud_id,))
     header = cur.fetchone()
     if not header:
         conn.close()
@@ -466,71 +319,14 @@ def get_closure_eligibility(ldud_id):
     if not header['nor_tendered']:
         missing.append('NOR Tendered (header field)')
 
-    # Anchorage recording: ≥1 row
-    cur.execute('SELECT COUNT(*) FROM ldud_anchorage WHERE ldud_id=%s', (ldud_id,))
-    if cur.fetchone()['count'] == 0:
-        missing.append('Anchorage Recording — at least 1 entry required')
-
-    # Anchorage: at least one row with discharge_started (gives Disch./Load Start)
-    cur.execute('SELECT COUNT(*) FROM ldud_anchorage WHERE ldud_id=%s AND discharge_started IS NOT NULL', (ldud_id,))
-    if cur.fetchone()['count'] == 0:
-        missing.append('Disch./Load Start — fill Discharge Started in Anchorage Recording')
-
-    # MV Anchorage Discharge/Loading: ≥1 vessel_operations row
-    cur.execute('SELECT COUNT(*) FROM ldud_vessel_operations WHERE ldud_id=%s', (ldud_id,))
-    if cur.fetchone()['count'] == 0:
-        missing.append('MV Anchorage Discharge/Loading — at least 1 entry required')
-
-    # Hold Completion: ≥1 row, all with commenced AND completed
-    cur.execute('SELECT COUNT(*) FROM ldud_hold_completion WHERE ldud_id=%s', (ldud_id,))
-    hc_total = cur.fetchone()['count']
-    if hc_total == 0:
-        missing.append('Hold Discharge/Loading Completion — at least 1 entry required')
-    else:
-        cur.execute('''SELECT COUNT(*) FROM ldud_hold_completion
-                       WHERE ldud_id=%s AND (commenced IS NULL OR completed IS NULL)''', (ldud_id,))
-        hc_incomplete = cur.fetchone()['count']
-        if hc_incomplete > 0:
-            missing.append(f'Hold Completion — {hc_incomplete} hold(s) missing Commenced/Completed dates')
-
-    # Vessel operations total vs BL total
-    vcn_id = header['vcn_id']
-    op_type = header['operation_type']
-
-    cur.execute(
-        'SELECT COALESCE(SUM(quantity), 0) AS total FROM ldud_vessel_operations WHERE ldud_id = %s',
-        (ldud_id,)
-    )
-    ops_total = float(cur.fetchone()['total'])
-
-    bl_total = 0.0
-    if vcn_id:
-        if op_type == 'Export':
-            cur.execute('SELECT COALESCE(SUM(bl_quantity), 0) AS total FROM vcn_export_cargo_declaration WHERE vcn_id=%s', (vcn_id,))
-            bl_total = float(cur.fetchone()['total'])
-        else:
-            # import quantities come from the consigner (IGM line) table;
-            # fall back to historic cargo declarations for older VCNs
-            cur.execute('SELECT quantity FROM vcn_consigners WHERE vcn_id=%s', (vcn_id,))
-            for r in cur.fetchall():
-                try:
-                    bl_total += float(str(r['quantity']).replace(',', '')) if r['quantity'] else 0.0
-                except ValueError:
-                    pass
-            if bl_total == 0.0:
-                cur.execute('SELECT COALESCE(SUM(bl_quantity), 0) AS total FROM vcn_cargo_declaration WHERE vcn_id=%s', (vcn_id,))
-                bl_total = float(cur.fetchone()['total'])
-
     conn.close()
     eligible = len(missing) == 0
-    can_full_close = eligible and bl_total > 0 and abs(ops_total - bl_total) < 0.01
-
     return {
         'eligible': eligible,
         'missing': missing,
-        'ops_total': ops_total,
-        'bl_total': bl_total,
-        'can_full_close': can_full_close
+        'ops_total': 0,
+        'bl_total': 0,
+        'can_full_close': eligible,
     }
 
 
@@ -566,15 +362,3 @@ def get_closure_log(record_id):
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
-
-def save_hold_cargo(ldud_id, hold_name, cargo_name):
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('''
-        INSERT INTO ldud_hold_cargo (ldud_id, hold_name, cargo_name)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (ldud_id, hold_name) DO UPDATE SET cargo_name = EXCLUDED.cargo_name
-    ''', (ldud_id, hold_name, cargo_name or None))
-    conn.commit()
-    conn.close()

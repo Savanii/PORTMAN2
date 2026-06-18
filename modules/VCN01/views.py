@@ -145,14 +145,15 @@ def get_consigners(vcn_id):
 @bp.route('/api/module/VCN01/parcels/<int:vcn_id>')
 @login_required
 def get_parcels(vcn_id):
-    """Compact parcel list for cross-module pickers (e.g. LDUD unloading)."""
+    """Compact parcel list for cross-module pickers (e.g. LDUD).
+    Operation-type aware: Import → consigners, Export → export cargo."""
     parcels = [{
         'id': p['id'],
         'parcel_no': p.get('parcel_no'),
         'cargo_name': p.get('cargo_name'),
         'consigner_name': p.get('consigner_name'),
         'quantity': p.get('quantity'),
-    } for p in model.get_parcels(vcn_id)]
+    } for p in model.get_picker_parcels(vcn_id)]
     return jsonify(parcels)
 
 @bp.route('/api/module/VCN01/consigners/save', methods=['POST'])
@@ -240,7 +241,10 @@ def save_export_cargo():
     if not perms.get('can_add') and not perms.get('can_edit'):
         return jsonify({'error': 'No permission'}), 403
     row_id = model.save_export_cargo_declaration(request.json)
-    return jsonify({'success': True, 'id': row_id})
+    parcel = model.get_export_parcel(row_id) or {}
+    return jsonify({'success': True, 'id': row_id,
+                    'parcel_no': parcel.get('parcel_no'),
+                    'parcel_seq': parcel.get('parcel_seq')})
 
 @bp.route('/api/module/VCN01/export_cargo/delete', methods=['POST'])
 @login_required

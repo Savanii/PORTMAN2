@@ -645,214 +645,6 @@
         return String(a).localeCompare(String(b));
     }
 
-    function getHoldDefs(ldudId) {
-        return vesselOpsHoldFields[ldudId] || [];
-    }
-
-    function buildVesselOpsRowsFromApi(ldudId, apiRows) {
-        const holdDefs = getHoldDefs(ldudId);
-        const holdByName = {};
-        holdDefs.forEach(def => { holdByName[def.hold_name] = def; });
-
-        const grouped = {};
-        (apiRows || []).forEach(r => {
-            const def = holdByName[r.hold_name];
-            if (!def) return;
-
-            const opDate = normalizeDate(r.start_time || r.end_time);
-            const key = opDate || '__NO_DATE__';
-            if (!grouped[key]) {
-                const row = {op_date: opDate, parcel_id: null, __cellIds: {}};
-                holdDefs.forEach(d => {
-                    row[d.field] = '';
-                    row.__cellIds[d.field] = [];
-                });
-                grouped[key] = row;
-            }
-
-            const row = grouped[key];
-            const qty = parseFloat(r.quantity || 0);
-            const current = parseFloat(row[def.field] || 0);
-            row[def.field] = (current + (Number.isFinite(qty) ? qty : 0));
-            row.__cellIds[def.field].push(r.id);
-            // Carry parcel_id from any cell that has one (last-wins; all cells on a date should share same parcel)
-            if (r.parcel_id != null) row.parcel_id = r.parcel_id;
-        });
-
-        return Object.values(grouped).sort((a, b) => (a.op_date || '').localeCompare(b.op_date || ''));
-    }
-
-    function getVesselOpsDischargedByHold(ldudId) {
-        const dischargedByHold = {};
-        const holdDefs = getHoldDefs(ldudId);
-        const tableRef = subTables[ldudId] && subTables[ldudId].vessel_ops;
-        if (!tableRef) return dischargedByHold;
-
-        tableRef.getRows().forEach(row => {
-            const data = row.getData();
-            holdDefs.forEach(def => {
-                const qty = parseFloat(data[def.field] || 0);
-                if (!Number.isFinite(qty) || qty <= 0) return;
-                if (!dischargedByHold[def.hold_name]) dischargedByHold[def.hold_name] = 0;
-                dischargedByHold[def.hold_name] += qty;
-            });
-        });
-
-        return dischargedByHold;
-    }
-
-    async function saveVesselOpsCell(payload) {
-        const res = await fetch('/api/module/LDUD01/vessel_ops/save', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        const result = await res.json();
-        if (!res.ok || !result.success || !result.id) {
-            throw new Error(result.error || 'Failed to save vessel operation cell');
-        }
-        return result.id;
-    }
-
-    async function deleteVesselOpsCell(id) {
-        const res = await fetch('/api/module/LDUD01/vessel_ops/delete', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({id})
-        });
-        const result = await res.json();
-        if (!res.ok || !result.success) {
-            throw new Error(result.error || 'Failed to delete vessel operation cell');
-        }
-    }
-
-    function addVesselOpsDateRow(ldudId) {
-        const tableRef = subTables[ldudId] && subTables[ldudId].vessel_ops;
-        if (!tableRef) return;
-        const holdDefs = getHoldDefs(ldudId);
-        // Default date: day after the last existing row's date, or today if no rows
-        let nextDate = getTodayDate();
-        const existingRows = tableRef.getRows();
-        if (existingRows.length > 0) {
-            const lastDate = existingRows[existingRows.length - 1].getData().op_date;
-            if (lastDate) {
-                const d = new Date(lastDate);
-                d.setDate(d.getDate() + 1);
-                nextDate = d.toISOString().split('T')[0];
-            }
-        }
-        const newRow = {op_date: nextDate, __cellIds: {}};
-        holdDefs.forEach(def => {
-            newRow[def.field] = '';
-            newRow.__cellIds[def.field] = [];
-        });
-        tableRef.addRow(newRow, false);
-        updateHoldSummary(ldudId);
-    }
-
-    async function deleteVesselOpsDateRow(ldudId, row) {
-        if (!confirm('Delete this date row?')) return;
-
-        const data = row.getData();
-        const holdDefs = getHoldDefs(ldudId);
-        try {
-            for (const def of holdDefs) {
-                const ids = (data.__cellIds && Array.isArray(data.__cellIds[def.field])) ? data.__cellIds[def.field] : [];
-                for (const id of ids) {
-                    await deleteVesselOpsCell(id);
-                }
-            }
-            row.delete();
-            updateHoldSummary(ldudId);
-        } catch (err) {
-            alert(`Error deleting vessel operation row: ${err.message}`);
-        }
-    }
-
-    async function saveVesselOpsTable(ldudId, silent = false) {
-        const tableRef = subTables[ldudId] && subTables[ldudId].vessel_ops;
-        if (!tableRef) return;
-
-        const holdDefs = getHoldDefs(ldudId);
-        const rows = tableRef.getRows();
-
-        for (const row of rows) {
-            const data = row.getData();
-            const opDate = normalizeDate(data.op_date);
-            const hasQty = holdDefs.some(def => {
-                const qty = parseFloat(data[def.field]);
-                return Number.isFinite(qty) && qty > 0;
-            });
-
-            if (hasQty && !opDate) {
-                alert('Date is required for rows where quantity is entered.');
-                return;
-            }
-        }
-
-        let savedCount = 0;
-        let deletedCount = 0;
-
-        try {
-            for (const row of rows) {
-                const data = row.getData();
-                const opDate = normalizeDate(data.op_date);
-                if (!data.__cellIds || typeof data.__cellIds !== 'object') {
-                    data.__cellIds = {};
-                }
-
-                for (const def of holdDefs) {
-                    const rawQty = data[def.field];
-                    const parsedQty = parseFloat(rawQty);
-                    const hasQty = Number.isFinite(parsedQty) && parsedQty > 0;
-                    const ids = Array.isArray(data.__cellIds[def.field]) ? [...data.__cellIds[def.field]] : [];
-
-                    if (hasQty) {
-                        const payload = {
-                            ldud_id: ldudId,
-                            hold_name: def.hold_name,
-                            start_time: opDate,
-                            end_time: null,
-                            cargo_name: def.cargo_name || null,
-                            quantity: parsedQty,
-                            parcel_id: data.parcel_id != null ? data.parcel_id : null
-                        };
-
-                        if (ids.length > 0) {
-                            payload.id = ids[0];
-                        }
-
-                        const savedId = await saveVesselOpsCell(payload);
-                        savedCount++;
-
-                        const keepIds = [savedId];
-                        const staleIds = ids.filter(x => x !== savedId);
-                        for (const staleId of staleIds) {
-                            await deleteVesselOpsCell(staleId);
-                            deletedCount++;
-                        }
-                        data.__cellIds[def.field] = keepIds;
-                    } else {
-                        for (const id of ids) {
-                            await deleteVesselOpsCell(id);
-                            deletedCount++;
-                        }
-                        data.__cellIds[def.field] = [];
-                    }
-                }
-
-                row.update({op_date: opDate, __cellIds: data.__cellIds});
-            }
-
-            await tableRef.setData(`/api/module/LDUD01/vessel_ops/${ldudId}`);
-            updateHoldSummary(ldudId);
-            clearDirty('vessel_ops');
-            if (!silent) showSubStatus('vessel_ops', ldudId, `Saved ${savedCount} cell(s)${deletedCount ? `, removed ${deletedCount} empty cell(s)` : ''}`);
-        } catch (err) {
-            alert(`Error saving vessel operations: ${err.message}`);
-        }
-    }
-
     const CARGO_COLORS = [
         {bg:'#dbeafe', text:'#1d4ed8', border:'#93c5fd'},  // blue
         {bg:'#dcfce7', text:'#15803d', border:'#86efac'},  // green
@@ -925,9 +717,6 @@
             {title: "BL Quantity", field: "bl_quantities_display", width: 160, frozen: true,
                 formatter: function(cell) { return cargoColorBadges(cell.getValue()); }
             },
-            {title: "Total Disch / Balance", field: "balance_display", width: 180,
-                formatter: function(cell) { return cargoColorBadges(cell.getValue()); }
-            },
             {title: "NOR Tendered", field: "nor_tendered", editor: canEdit ? datetimeEditor : false, width: 150,
                 formatter: datetimeCellFormatter},
             {title: "Agent Name", field: "agent_name", width: 120},
@@ -947,11 +736,15 @@
                 formatter: datetimeCellFormatter},
             {title: "Agent/Custom/Stevedore On Board", field: "agent_stevedore_onboard", editor: canEdit ? datetimeEditor : false, width: 200,
                 formatter: datetimeCellFormatter},
-            {title: "Discharge/Loading Started", field: "ops_started", width: 170,
-                titleFormatter: function() { return "Disch./Load. Started"; },
+            {title: "Alongside (Date/Time)", field: "alongside_datetime", editor: canEdit ? datetimeEditor : false, width: 160,
                 formatter: datetimeCellFormatter},
-            {title: "Discharge/Loading Completed", field: "ops_completed", width: 170,
-                titleFormatter: function() { return "Disch./Load. Completed"; },
+            {title: "OPS Commenced", field: "ops_commenced", editor: canEdit ? datetimeEditor : false, width: 150,
+                formatter: datetimeCellFormatter},
+            {title: "Cast Off Date/Time", field: "cast_off_datetime", editor: canEdit ? datetimeEditor : false, width: 160,
+                formatter: datetimeCellFormatter},
+            {title: "Pilot Board Departure", field: "pilot_board_departure", editor: canEdit ? datetimeEditor : false, width: 160,
+                formatter: datetimeCellFormatter},
+            {title: "Pilot Disembarked", field: "pilot_disembarked", editor: canEdit ? datetimeEditor : false, width: 160,
                 formatter: datetimeCellFormatter},
             {title: "Status", field: "doc_status", width: 110,
                 formatter: function(cell) {
@@ -1118,76 +911,23 @@
         const modalBody = document.getElementById('modalSubTables');
         modalBody.innerHTML = '';
 
-        const anchorageTitle = operationType === 'Export' ? 'Anchorage Recording Export' : 'Anchorage Recording';
         const canAct = (permissions.can_edit || permissions.can_add) && isUnlocked;
 
-        // Build vessel ops section — Import uses pivot+hold-summary, Export uses simple row table
-        let vesselOpsSection = '';
-        if (operationType === 'Export') {
-            vesselOpsSection = `
-            <div class="sub-section">
-                <div class="sub-section-header" data-section="vessel_ops">
-                    <span>MV Anchorage Loading</span>
-                    <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-add" onclick="addVesselOpsDateRow(${ldudId})">+ Add</button>` : ''}
-                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('vessel_ops', ${ldudId})">Save</button>` : ''}
-                    </div>
-                </div>
-                <div class="sub-section-content">
-                    <div id="hold-cargo-panel-${ldudId}" style="padding:6px 10px;background:#eff6ff;border-bottom:1px solid #bfdbfe;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11px;min-height:34px;"></div>
-                    <div id="vessel_ops-table-${ldudId}" class="sub-tabulator"></div>
-                </div>
-            </div>`;
-        } else {
-            vesselOpsSection = `
-            <div class="sub-section">
-                <div class="sub-section-header" data-section="vessel_ops">
-                    <span>MV Anchorage Discharge</span>
-                    <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-add" onclick="addVesselOpsDateRow(${ldudId})">+ Add</button>` : ''}
-                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('vessel_ops', ${ldudId})">Save</button>` : ''}
-                    </div>
-                </div>
-                <div class="sub-section-content">
-                    <div id="hold-cargo-panel-${ldudId}" style="padding:6px 10px;background:#eff6ff;border-bottom:1px solid #bfdbfe;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11px;min-height:34px;"></div>
-                    <div id="vessel_ops-table-${ldudId}" class="sub-tabulator"></div>
-                </div>
-            </div>`;
-        }
-
         // Create the sub-table container
+        // ponytail: Delays / Anchorage / MV Discharge / Hold Completion sub-tables
+        // removed — LDUD01 now captures ops via Parcel Operations + header timing.
         const subContainer = document.createElement('div');
         subContainer.className = 'sub-table-container';
         subContainer.innerHTML = `
             <div class="sub-section">
-                <div class="sub-section-header" data-section="delays">
-                    <span>Delays</span>
+                <div class="sub-section-header" data-section="parcel_ops">
+                    <span>Parcel Operations</span>
                     <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('delays', ${ldudId})">+ Add</button>` : ''}
-                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('delays', ${ldudId})">Save</button>` : ''}
+                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('parcel_ops', ${ldudId})">+ Add</button>` : ''}
+                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('parcel_ops', ${ldudId})">Save</button>` : ''}
                     </div>
                 </div>
-                <div class="sub-section-content"><div id="delays-table-${ldudId}" class="sub-tabulator"></div></div>
-            </div>
-            <div class="sub-section">
-                <div class="sub-section-header" data-section="anchorage">
-                    <span>${anchorageTitle}</span>
-                    <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('anchorage', ${ldudId})">+ Add</button>` : ''}
-                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('anchorage', ${ldudId})">Save</button>` : ''}
-                    </div>
-                </div>
-                <div class="sub-section-content"><div id="anchorage-table-${ldudId}" class="sub-tabulator"></div></div>
-            </div>
-            ${vesselOpsSection}
-            <div class="sub-section">
-                <div class="sub-section-header" data-section="hold_completion">
-                    <span>${operationType === 'Export' ? 'Hold Loading Completion' : 'Hold Discharge Completion'}</span>
-                    <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('hold_completion', ${ldudId})">Save</button>` : ''}
-                    </div>
-                </div>
-                <div class="sub-section-content"><div id="hold_completion-table-${ldudId}" class="sub-tabulator"></div></div>
+                <div class="sub-section-content"><div id="parcel_ops-table-${ldudId}" class="sub-tabulator"></div></div>
             </div>`;
 
         // Append to modal body
@@ -1238,83 +978,6 @@
             }
         });
     });
-
-    function renderHoldCargoPanel(ldudId, operationType) {
-        const panel = document.getElementById(`hold-cargo-panel-${ldudId}`);
-        if (!panel) return;
-        const holdDefs = getHoldDefs(ldudId);
-        const canEdit = permissions.can_edit || permissions.can_add;
-
-        // Clear panel
-        panel.innerHTML = '';
-
-        if (!holdDefs.length) {
-            const msg = document.createElement('span');
-            msg.style.cssText = 'color:#94a3b8;font-style:italic;font-size:11px;';
-            msg.textContent = operationType === 'Export' ? 'No holds — set No. of Holds on vessel in VC01' : 'No holds in stowage plan';
-            panel.appendChild(msg);
-            return;
-        }
-
-        const label = document.createElement('span');
-        label.style.cssText = 'font-weight:600;color:#1e40af;white-space:nowrap;margin-right:4px;font-size:11px;';
-        label.textContent = 'Cargo per Hold:';
-        panel.appendChild(label);
-
-        holdDefs.forEach(def => {
-            const wrap = document.createElement('span');
-            wrap.style.cssText = 'display:inline-flex;align-items:center;gap:3px;background:white;border:1px solid #bfdbfe;border-radius:4px;padding:2px 6px;';
-
-            const holdLbl = document.createElement('span');
-            holdLbl.style.cssText = 'font-weight:600;color:#374151;white-space:nowrap;font-size:11px;';
-            holdLbl.textContent = def.hold_name + ':';
-
-            const sel = document.createElement('select');
-            const isEditable = canEdit && operationType === 'Export';
-            sel.style.cssText = `font-size:11px;border:none;outline:none;background:transparent;cursor:${isEditable ? 'pointer' : 'default'};max-width:150px;`;
-            if (!isEditable) sel.disabled = true;
-
-            const emptyOpt = document.createElement('option');
-            emptyOpt.value = ''; emptyOpt.textContent = '-- Select --';
-            sel.appendChild(emptyOpt);
-
-            const availableCargo = (operationType === 'Export' && vcnCargoCache[ldudId] && vcnCargoCache[ldudId].length)
-                ? vcnCargoCache[ldudId]
-                : cargoNames;
-
-            // Auto-select if only one cargo option and hold not yet assigned
-            if (availableCargo.length === 1 && !def.cargo_name) {
-                def.cargo_name = availableCargo[0];
-                saveHoldCargo(ldudId, def.hold_name, availableCargo[0]);
-            }
-
-            availableCargo.forEach(c => {
-                const opt = document.createElement('option');
-                opt.value = c; opt.textContent = c;
-                if (c === def.cargo_name) opt.selected = true;
-                sel.appendChild(opt);
-            });
-
-            sel.onchange = function() { saveHoldCargo(ldudId, def.hold_name, this.value); };
-
-            wrap.appendChild(holdLbl);
-            wrap.appendChild(sel);
-            panel.appendChild(wrap);
-        });
-    }
-
-    async function saveHoldCargo(ldudId, holdName, cargoName) {
-        // Update local holdDefs
-        const def = (vesselOpsHoldFields[ldudId] || []).find(d => d.hold_name === holdName);
-        if (def) def.cargo_name = cargoName;
-        if (holdCargoConfig[ldudId]) holdCargoConfig[ldudId][holdName] = cargoName;
-
-        await fetch('/api/module/LDUD01/hold_cargo/save', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ldud_id: ldudId, hold_name: holdName, cargo_name: cargoName})
-        });
-    }
 
     async function initSubTables(ldudId, operationType = 'Import') {
         const _hRow = table.getRows().find(r => r.getData().id === ldudId);
@@ -1382,9 +1045,8 @@
             stowagePlanData[ldudId] = [];
         }
 
-        // Fetch hold cargo config (per-hold cargo overrides)
-        const holdCargoRes = await fetch(`/api/module/LDUD01/hold_cargo/${ldudId}`);
-        holdCargoConfig[ldudId] = await holdCargoRes.json();
+        // ponytail: hold_cargo config removed with the MV-discharge sub-table
+        holdCargoConfig[ldudId] = {};
 
         if (operationType === 'Export' && vcnId) {
             // Build export holds from vessel's no_of_holds
@@ -1417,15 +1079,18 @@
 
         // Fetch parcels for this VCN so we can show a Parcel picker in the vessel-ops sub-table
         const parcelOptions = {};
+        let parcelList = [];
         if (vcnId) {
             try {
                 const parcelRes = await fetch(`/api/module/VCN01/parcels/${vcnId}`);
-                const parcelList = await parcelRes.json();
+                parcelList = await parcelRes.json();
                 parcelList.forEach(p => {
                     parcelOptions[p.id] = `${p.parcel_no || ('#'+p.id)} — ${p.cargo_name || ''}${p.consigner_name ? ' / ' + p.consigner_name : ''}`;
                 });
             } catch (e) { /* parcels unavailable — leave empty, picker shows nothing */ }
         }
+        const parcelById = {};
+        parcelList.forEach(p => { parcelById[p.id] = p; });
 
         const delayOptions = {};
         delayTypes.forEach(d => { delayOptions[d] = d; });
@@ -1604,380 +1269,129 @@
             return wrapper;
         };
 
-        // Delays table
-        subTables[ldudId].delays = new Tabulator(`#delays-table-${ldudId}`, {
-            layout: "fitDataFill",
-            height: 200,
-            ajaxURL: `/api/module/LDUD01/delays/${ldudId}`,
-            columnDefaults: { headerSort: false },
-            cellEdited: () => markDirty('delays'),
-            columns: [
-                {title: "Crane No", field: "crane_number", width: 110, editor: canEdit ? craneMultiSelectEditor : false,
-                    formatter: function(cell) {
-                        var val = cell.getValue();
-                        if (!val) return '';
-                        return val.split(',').map(function(v) {
-                            return '<span style="background:#3182ce;color:white;padding:1px 6px;border-radius:3px;font-size:10px;margin-right:2px;">' + v.trim() + '</span>';
-                        }).join('');
-                    }
-                },
-                {title: "Delay Name", field: "delay_name", width: 120, editor: canEdit ? "list" : false,
-                    editorParams: {values: delayOptions, autocomplete: true, allowEmpty: true}},
-                {title: "Start", field: "start_datetime", width: 140, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
-                {title: "End", field: "end_datetime", width: 140, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
-                {title: "Mins", field: "total_time_mins", width: 60, hozAlign: "right"},
-                {title: "Hrs", field: "total_time_hrs", width: 60, hozAlign: "right"},
-                {title: "Minus Hrs", field: "minus_delay_hours", width: 70, editor: canEdit ? "list" : false,
-                    editorParams: {values: yesNoOptions}},
-                canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 50, hozAlign: "center", headerSort: false,
-                    cellClick: function(e, cell) { deleteSubRow('delays', cell.getRow().getData().id, ldudId); }
-                } : null
-            ].filter(Boolean)
-        });
-        if (isDark) document.querySelector(`#delays-table-${ldudId}`).classList.add('tabulator-dark');
 
-        // Anchorage Recording table
-        const anchorageOptions = {};
-        anchorageNames.forEach(a => { anchorageOptions[a] = a; });
+        // ── Parcel Operations: rows over VCN parcels; same-cargo parcels mergeable ──
+        // Checkbox-dropdown editor. Once one parcel is ticked, parcels of a
+        // different cargo are disabled — enforcing the same-cargo merge rule.
+        const parcelEditor = function(cell, onRendered, success, cancel) {
+            const selected = new Set(String(cell.getValue() || '').split(',').map(s => s.trim()).filter(Boolean));
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = 'width:100%;height:100%;display:flex;align-items:center;padding:0 6px;font-size:11px;';
+            wrapper.textContent = selected.size ? `${selected.size} parcel(s)` : 'Pick parcels…';
+            wrapper.tabIndex = 0;
 
-        const anchorageStartedTitle = operationType === 'Export' ? 'Loading Started' : 'Discharge Started';
-        const anchorageCompletedTitle = operationType === 'Export' ? 'Loading Completed' : 'Discharge Completed';
-
-        subTables[ldudId].anchorage = new Tabulator(`#anchorage-table-${ldudId}`, {
-            layout: "fitColumns",
-            height: 200,
-            ajaxURL: `/api/module/LDUD01/anchorage/${ldudId}`,
-            columnDefaults: { headerSort: false },
-            cellEdited: () => markDirty('anchorage'),
-            columns: [
-                {title: "Anchorage Name", field: "anchorage_name", widthGrow: 1, editor: canEdit ? "list" : false,
-                    editorParams: {values: anchorageOptions, autocomplete: true, allowEmpty: true}},
-                {title: "Anchored", field: "anchored", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
-                {title: anchorageStartedTitle, field: "discharge_started", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
-                {title: anchorageCompletedTitle, field: "discharge_commenced", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
-                {title: "Anchor Aweigh", field: "anchor_aweigh", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
-                {title: "Cargo Quantity", field: "cargo_quantity", widthGrow: 1, editor: canEdit ? "number" : false, hozAlign: "right",
-                    editorParams: {min: 0, step: 0.01}},
-                canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 50, widthGrow: 0, hozAlign: "center", headerSort: false,
-                    cellClick: function(e, cell) { deleteSubRow('anchorage', cell.getRow().getData().id, ldudId); }
-                } : null
-            ].filter(Boolean)
-        });
-        if (isDark) document.querySelector(`#anchorage-table-${ldudId}`).classList.add('tabulator-dark');
-
-        {
-            // Both Import and Export use a pivot table layout.
-            // Import: holds from stowage plan, shows Balance On Board
-            // Export: holds from vessel no_of_holds, shows Total Loaded only
-            const holdDefs = getHoldDefs(ldudId);
-            const isExport = operationType === 'Export';
-
-            // Build column groups: each hold gets a group with title "Hold XX (Cargo)"
-            const vesselOpsHoldColumnGroups = holdDefs.map((def, idx) => {
-                const cargoLabel = def.cargo_name ? ` (${def.cargo_name})` : '';
-                const subTitle = isExport
-                    ? `H${idx + 1}`
-                    : `H${idx + 1} Stow: ${parseFloat(def.stowage_qty || 0).toFixed(2)}`;
-                return {
-                    title: `${def.hold_name}${cargoLabel}`,
-                    columns: [{
-                        title: subTitle,
-                        field: def.field,
-                        width: 140,
-                        hozAlign: "right",
-                        editor: canEdit ? "number" : false,
-                        editorParams: {min: 0, step: 0.01},
-                        cellEdited: function() { updateHoldSummary(ldudId); },
-                        bottomCalc: function(values) {
-                            let sum = 0;
-                            values.forEach(v => { const n = parseFloat(v || 0); if (Number.isFinite(n)) sum += n; });
-                            return sum;
-                        },
-                        bottomCalcFormatter: function(cell) {
-                            const total = parseFloat(cell.getValue() || 0);
-                            if (isExport) {
-                                return total > 0 ? `<div style="font-weight:600;color:#15803d;">${total.toFixed(2)}</div>` : '';
-                            }
-                            const matchDef = holdDefs.find(d => d.field === cell.getColumn().getField());
-                            const stowage = matchDef ? parseFloat(matchDef.stowage_qty || 0) : 0;
-                            const balance = stowage - total;
-                            const balColor = balance < 0 ? '#e53e3e' : balance === 0 ? '#38a169' : '#1f2937';
-                            return `<div style="line-height:1.8;">
-                                <div style="border-bottom:1px solid #cbd5e0;padding-bottom:2px;">${total > 0 ? total.toFixed(2) : ''}</div>
-                                <div style="color:${balColor};padding-top:2px;">${balance.toFixed(2)}</div>
-                            </div>`;
-                        }
-                    }]
-                };
-            });
-
-            // Total column
-            const totalLabel = isExport ? 'Total Loaded' : 'Total Day Qty';
-            let totalStowageAll = 0;
-            if (!isExport) holdDefs.forEach(def => { totalStowageAll += parseFloat(def.stowage_qty || 0); });
-            const totalColSubTitle = isExport ? '' : `Total Stow: ${totalStowageAll.toFixed(2)}`;
-            const totalDayQtyCol = {
-                title: totalLabel,
-                columns: [{
-                    title: totalColSubTitle,
-                    field: "total_day_qty",
-                    width: 130,
-                    hozAlign: "right",
-                    formatter: function(cell) {
-                        const rowData = cell.getRow().getData();
-                        let total = 0;
-                        holdDefs.forEach(def => {
-                            const v = parseFloat(rowData[def.field] || 0);
-                            if (Number.isFinite(v)) total += v;
-                        });
-                        return total > 0 ? total.toFixed(2) : '';
-                    },
-                    bottomCalc: function(values, data) {
-                        let grandTotal = 0;
-                        (data || []).forEach(row => {
-                            holdDefs.forEach(def => {
-                                const v = parseFloat(row[def.field] || 0);
-                                if (Number.isFinite(v)) grandTotal += v;
-                            });
-                        });
-                        return grandTotal;
-                    },
-                    bottomCalcFormatter: function(cell) {
-                        const grand = parseFloat(cell.getValue() || 0);
-                        if (isExport) {
-                            return `<div style="font-weight:700;color:#15803d;">${grand > 0 ? grand.toFixed(2) : ''}</div>`;
-                        }
-                        const totalBalance = totalStowageAll - grand;
-                        const balColor = totalBalance < 0 ? '#e53e3e' : totalBalance === 0 ? '#38a169' : '#1f2937';
-                        return `<div style="line-height:1.8;font-weight:700;">
-                            <div style="border-bottom:1px solid #cbd5e0;padding-bottom:2px;">${grand > 0 ? grand.toFixed(2) : ''}</div>
-                            <div style="color:${balColor};padding-top:2px;">${totalBalance.toFixed(2)}</div>
-                        </div>`;
-                    }
-                }]
-            };
-
-            // Date column with bottom label
-            const dateCol = {
-                title: "Date", field: "op_date", width: 130, editor: canEdit ? dateEditor : false,
-                bottomCalcFormatter: function() {
-                    if (isExport) {
-                        return `<div style="font-weight:700;color:#15803d;">Total Loaded</div>`;
-                    }
-                    return `<div style="line-height:1.8;font-weight:700;">
-                        <div style="border-bottom:1px solid #cbd5e0;padding-bottom:2px;color:#8B6914;">Total Discharge</div>
-                        <div style="color:#2563eb;padding-top:2px;">Balance On Board</div>
-                    </div>`;
-                },
-                bottomCalc: function() { return ''; }
-            };
-
-            subTables[ldudId].vessel_ops = new Tabulator(`#vessel_ops-table-${ldudId}`, {
-                layout: "fitDataFill",
-                height: 300,
-                ajaxURL: `/api/module/LDUD01/vessel_ops/${ldudId}`,
-                ajaxResponse: function(url, params, response) {
-                    return buildVesselOpsRowsFromApi(ldudId, response);
-                },
-                columnDefaults: { headerSort: false },
-                columnHeaderVertAlign: "bottom",
-                cellEdited: () => markDirty('vessel_ops'),
-                columns: [
-                    dateCol,
-                    {title: "Parcel", field: "parcel_id", widthGrow: 1.4,
-                        editor: canEdit ? "list" : false,
-                        editorParams: {values: parcelOptions, autocomplete: true, allowEmpty: true},
-                        formatter: function(cell) {
-                            const v = cell.getValue();
-                            return v != null && parcelOptions[v] ? parcelOptions[v] : '';
-                        }
-                    },
-                    ...vesselOpsHoldColumnGroups,
-                    totalDayQtyCol,
-                    canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 50, hozAlign: "center", headerSort: false,
-                        cellClick: function(e, cell) { deleteVesselOpsDateRow(ldudId, cell.getRow()); }
-                    } : null
-                ].filter(Boolean)
-            });
-            if (isDark) document.querySelector(`#vessel_ops-table-${ldudId}`).classList.add('tabulator-dark');
-
-            // Render cargo-per-hold panel above the table
-            renderHoldCargoPanel(ldudId, operationType);
-        }
-
-        // Hold Completion table
-        // Total Time formatter: compute HH:MM from commenced/completed
-        function holdTotalTimeFormatter(cell) {
-            const row = cell.getRow().getData();
-            if (!row.commenced || !row.completed) return '';
-            try {
-                var start = new Date(row.commenced.replace(' ', 'T'));
-                var end = new Date(row.completed.replace(' ', 'T'));
-                var diffMs = end - start;
-                if (diffMs < 0) return '<span style="color:#e53e3e">Invalid</span>';
-                var totalMins = Math.floor(diffMs / 60000);
-                var hrs = Math.floor(totalMins / 60);
-                var mins = totalMins % 60;
-                return hrs.toString().padStart(2, '0') + ':' + mins.toString().padStart(2, '0');
-            } catch (e) { return ''; }
-        }
-
-        // Dynamically sync hold completion rows from source holds
-        // Import: holds come from stowage plan; Export: holds come from MV Anchorage Loading (vessel_ops)
-        function getSourceHolds() {
-            if (operationType === 'Export') {
-                // Get unique hold names from vessel_ops (MV Anchorage Loading) table
-                const holdsSet = new Set();
-                if (subTables[ldudId] && subTables[ldudId].vessel_ops) {
-                    subTables[ldudId].vessel_ops.getRows().forEach(row => {
-                        const hn = row.getData().hold_name;
-                        if (hn) hn.split(',').forEach(h => holdsSet.add(h.trim()));
-                    });
-                }
-                return Array.from(holdsSet).sort(sortHoldNames);
-            } else {
-                return Object.keys(stowageHoldMeta[ldudId] || {}).sort(sortHoldNames);
+            const dd = document.createElement('div');
+            dd.style.cssText = 'position:fixed;z-index:10000;background:white;border:1px solid #cbd5e1;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.18);padding:8px;display:none;max-height:280px;overflow:auto;min-width:240px;';
+            if (!parcelList.length) {
+                const m = document.createElement('div');
+                m.style.cssText = 'font-size:11px;color:#64748b;padding:4px;';
+                m.textContent = 'No parcels — link an approved VCN first.';
+                dd.appendChild(m);
             }
-        }
-
-        async function syncHoldCompletionRows(existingRows) {
-            const sourceHolds = getSourceHolds();
-            const existingHoldNames = existingRows.map(r => r.hold_name);
-            // Create rows for holds that don't exist yet
-            const missingHolds = sourceHolds.filter(h => !existingHoldNames.includes(h));
-            // Delete rows for holds that are no longer in source
-            const extraRows = existingRows.filter(r => !sourceHolds.includes(r.hold_name));
-
-            const createPromises = missingHolds.map(holdName =>
-                fetch('/api/module/LDUD01/hold_completion/save', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ldud_id: ldudId, hold_name: holdName})
-                }).then(r => r.json())
-            );
-            const deletePromises = extraRows.map(r =>
-                fetch('/api/module/LDUD01/hold_completion/delete', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({id: r.id})
-                })
-            );
-            await Promise.all([...createPromises, ...deletePromises]);
-
-            if (missingHolds.length > 0 || extraRows.length > 0) {
-                // Refetch the full list after sync
-                const res = await fetch(`/api/module/LDUD01/hold_completion/${ldudId}`);
-                return await res.json();
+            const boxes = [];
+            parcelList.forEach(p => {
+                const lbl = document.createElement('label');
+                lbl.style.cssText = 'display:flex;gap:6px;align-items:center;padding:3px 4px;font-size:11px;cursor:pointer;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.value = String(p.id); cb.dataset.cargo = p.cargo_name || '';
+                cb.checked = selected.has(String(p.id));
+                cb.style.cssText = 'margin:0;width:14px;height:14px;cursor:pointer;';
+                cb.addEventListener('change', refresh);
+                lbl.appendChild(cb);
+                lbl.appendChild(document.createTextNode(`${p.parcel_no || ('#'+p.id)} — ${p.cargo_name || ''}`));
+                dd.appendChild(lbl);
+                boxes.push(cb);
+            });
+            function activeCargo() {
+                const c = boxes.find(b => b.checked);
+                return c ? c.dataset.cargo : null;
             }
-            return existingRows;
-        }
-
-        const holdCompCommencedTitle = operationType === 'Export' ? 'Loading Commenced' : 'Discharge Commenced';
-        const holdCompCompletedTitle = operationType === 'Export' ? 'Loading Completed' : 'Discharge Completed';
-
-        subTables[ldudId].hold_completion = new Tabulator(`#hold_completion-table-${ldudId}`, {
-            layout: "fitColumns",
-            height: 200,
-            ajaxURL: `/api/module/LDUD01/hold_completion/${ldudId}`,
-            columnDefaults: { headerSort: false },
-            cellEdited: () => markDirty('hold_completion'),
-            ajaxResponse: function(url, params, response) {
-                // Sync holds asynchronously then update the table
-                syncHoldCompletionRows(response).then(synced => {
-                    if (synced !== response) {
-                        subTables[ldudId].hold_completion.setData(synced);
-                    }
+            function refresh() {
+                const cargo = activeCargo();
+                boxes.forEach(b => {
+                    const mismatch = cargo !== null && b.dataset.cargo !== cargo && !b.checked;
+                    b.disabled = mismatch;
+                    b.parentNode.style.opacity = mismatch ? '0.4' : '1';
                 });
-                // Sort by source hold order for now
-                const sourceHolds = getSourceHolds();
-                return response.sort((a, b) => sourceHolds.indexOf(a.hold_name) - sourceHolds.indexOf(b.hold_name));
-            },
+            }
+            refresh();
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;';
+            const apply = document.createElement('button');
+            apply.textContent = 'Apply';
+            apply.style.cssText = 'flex:1;padding:4px 8px;font-size:11px;background:#3182ce;color:white;border:none;border-radius:4px;cursor:pointer;';
+            apply.addEventListener('click', function(e) {
+                e.stopPropagation();
+                const checked = boxes.filter(b => b.checked);
+                const ids = checked.map(b => b.value);
+                const cargo = checked.length ? checked[0].dataset.cargo : '';
+                cell.getRow().update({cargo_name: cargo});
+                cleanup();
+                success(ids.join(','));
+            });
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'flex:1;padding:4px 8px;font-size:11px;background:#e2e8f0;color:#374151;border:none;border-radius:4px;cursor:pointer;';
+            cancelBtn.addEventListener('click', function(e) { e.stopPropagation(); cleanup(); cancel(); });
+            btnRow.appendChild(apply); btnRow.appendChild(cancelBtn);
+            dd.appendChild(btnRow);
+            document.body.appendChild(dd);
+
+            function cleanup() {
+                if (dd.parentNode) dd.parentNode.removeChild(dd);
+                document.removeEventListener('mousedown', outside);
+            }
+            function outside(e) {
+                if (!dd.contains(e.target) && !wrapper.contains(e.target)) { cleanup(); cancel(); }
+            }
+            onRendered(function() {
+                const rect = cell.getElement().getBoundingClientRect();
+                dd.style.left = rect.left + 'px';
+                dd.style.top = (rect.bottom + 2) + 'px';
+                dd.style.display = 'block';
+                setTimeout(function() { document.addEventListener('mousedown', outside); }, 10);
+            });
+            return wrapper;
+        };
+
+        const parcelOpsFormatter = function(cell) {
+            const ids = String(cell.getValue() || '').split(',').map(s => s.trim()).filter(Boolean);
+            if (!ids.length) return '<span style="color:#94a3b8;">—</span>';
+            return ids.map(id => {
+                const p = parcelById[id];
+                const label = p ? (p.parcel_no || ('#' + id)) : ('#' + id);
+                return `<span style="background:#3182ce;color:white;padding:1px 6px;border-radius:3px;font-size:10px;margin-right:3px;">${label}</span>`;
+            }).join('') + (ids.length > 1 ? '<span style="color:#c05621;font-size:10px;font-weight:600;">merged</span>' : '');
+        };
+
+        subTables[ldudId].parcel_ops = new Tabulator(`#parcel_ops-table-${ldudId}`, {
+            layout: "fitColumns",
+            height: 200,
+            ajaxURL: `/api/module/LDUD01/parcel_ops/${ldudId}`,
+            columnDefaults: { headerSort: false },
+            cellEdited: () => markDirty('parcel_ops'),
             columns: [
-                {title: "Hold Name", field: "hold_name", widthGrow: 1},
-                {title: holdCompCommencedTitle, field: "commenced", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
+                {title: "Parcel(s)", field: "parcel_ids", widthGrow: 2, editor: canEdit ? parcelEditor : false,
+                    formatter: parcelOpsFormatter},
+                {title: "Cargo", field: "cargo_name", widthGrow: 1},
+                {title: "Start", field: "start_dt", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
                     formatter: datetimeCellFormatter},
-                {title: holdCompCompletedTitle, field: "completed", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
+                {title: "End", field: "end_dt", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
                     formatter: datetimeCellFormatter},
-                {title: "Total Time", field: "total_time", widthGrow: 0.5, hozAlign: "center",
-                    formatter: holdTotalTimeFormatter}
-            ]
+                canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 50, widthGrow: 0, hozAlign: "center", headerSort: false,
+                    cellClick: function(e, cell) { deleteSubRow('parcel_ops', cell.getRow().getData().id, ldudId); }
+                } : null
+            ].filter(Boolean)
         });
-        if (isDark) document.querySelector(`#hold_completion-table-${ldudId}`).classList.add('tabulator-dark');
+        if (isDark) document.querySelector(`#parcel_ops-table-${ldudId}`).classList.add('tabulator-dark');
     }
 
     function deleteButtonFormatter(cell) {
         return '<button class="btn-sub-delete">X</button>';
     }
 
-    async function saveExportVesselOpsTable(ldudId) {
-        const tableRef = subTables[ldudId] && subTables[ldudId].vessel_ops;
-        if (!tableRef) return;
-
-        // Fetch export cargo BL totals per cargo name for validation
-        const mainRow = table.getRows().find(r => r.getData().id === ldudId);
-        const vcnId = mainRow ? mainRow.getData().vcn_id : null;
-        const exportCargoTotals = {};
-        if (vcnId) {
-            const res = await fetch(`/api/module/VCN01/export_cargo/${vcnId}`);
-            const rows = await res.json();
-            rows.forEach(r => {
-                if (r.cargo_name) {
-                    exportCargoTotals[r.cargo_name] = (exportCargoTotals[r.cargo_name] || 0) + parseFloat(r.bl_quantity || 0);
-                }
-            });
-        }
-
-        // Sum vessel ops quantities per cargo name
-        const rows = tableRef.getRows();
-        const vesselOpsTotals = {};
-        rows.forEach(row => {
-            const d = row.getData();
-            if (d.cargo_name) {
-                vesselOpsTotals[d.cargo_name] = (vesselOpsTotals[d.cargo_name] || 0) + parseFloat(d.quantity || 0);
-            }
-        });
-
-        // Validate against export cargo BL totals
-        for (const [cargoName, total] of Object.entries(vesselOpsTotals)) {
-            const limit = exportCargoTotals[cargoName] || 0;
-            if (limit > 0 && total > limit) {
-                alert(`Total loading quantity for "${cargoName}" (${total}) exceeds declared BL quantity (${limit}).`);
-                return;
-            }
-        }
-
-        const savePromises = rows.filter(r => r.getData().id).map(async (row) => {
-            const d = row.getData();
-            const res = await fetch('/api/module/LDUD01/vessel_ops/save', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({...d, ldud_id: ldudId, end_time: null})
-            });
-            return res.json();
-        });
-        const results = await Promise.all(savePromises);
-        const savedCount = results.filter(r => r.success).length;
-        alert(`Saved ${savedCount} row(s)`);
-    }
-
-    function updateHoldSummary(ldudId) {
-        // Trigger recalc on the vessel_ops table so bottomCalc rows update
-        if (subTables[ldudId] && subTables[ldudId].vessel_ops) {
-            subTables[ldudId].vessel_ops.recalc();
-        }
-    }
-
     async function addSubRow(type, ldudId) {
-        if (type === 'vessel_ops') {
-            addVesselOpsDateRow(ldudId);
-            return;
-        }
 
         const res = await fetch(`/api/module/LDUD01/${type}/save`, {
             method: 'POST',
@@ -2009,29 +1423,10 @@
     }
 
     async function saveSubTable(type, ldudId, silent = false) {
-        if (type === 'vessel_ops') {
-            await saveVesselOpsTable(ldudId, silent);
-            return;
-        }
 
         if (!subTables[ldudId] || !subTables[ldudId][type]) return;
 
         const rows = subTables[ldudId][type].getRows();
-
-        // Validate hold_completion: completed must be after commenced
-        if (type === 'hold_completion') {
-            for (const row of rows) {
-                const d = row.getData();
-                if (d.commenced && d.completed) {
-                    const start = new Date(d.commenced.replace(' ', 'T'));
-                    const end = new Date(d.completed.replace(' ', 'T'));
-                    if (end < start) {
-                        if (!silent) showSubStatus(type, ldudId, `Error: Completed must be same or after Commenced for hold ${d.hold_name || ''}`, true);
-                        return;
-                    }
-                }
-            }
-        }
 
         const savePromises = rows.filter(r => r.getData().id).map(async (row) => {
             const data = row.getData();
@@ -2045,7 +1440,7 @@
         });
 
         const results = await Promise.all(savePromises);
-        let savedCount = 0;
+        let savedCount = 0, firstError = null;
         results.forEach(({row, result}) => {
             if (result.success) {
                 savedCount++;
@@ -2055,9 +1450,12 @@
                 if (type === 'hold_completion') {
                     row.reformat();
                 }
+            } else if (result.error && !firstError) {
+                firstError = result.error;
             }
         });
 
+        if (firstError && !silent) { showSubStatus(type, ldudId, `Error: ${firstError}`, true); return; }
         clearDirty(type);
         if (!silent) showSubStatus(type, ldudId, `Saved ${savedCount} row(s)`);
     }

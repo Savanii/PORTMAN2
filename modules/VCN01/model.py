@@ -148,6 +148,42 @@ def get_parcel(row_id):
 get_consigners = get_parcels
 
 
+def _operation_type(cur, vcn_id):
+    cur.execute('SELECT operation_type FROM vcn_header WHERE id=%s', [vcn_id])
+    row = cur.fetchone()
+    return (row or {}).get('operation_type') if row else None
+
+
+def get_picker_parcels(vcn_id):
+    """Operation-type-aware parcel list for cross-module pickers (LDUD).
+    Import → consigner rows; Export → export cargo declaration rows.
+    Returns a unified shape: id, parcel_no, cargo_name, consigner_name, quantity."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    if _operation_type(cur, vcn_id) == 'Export':
+        cur.execute('''SELECT id, parcel_no, cargo_name, customer_name AS consigner_name,
+                              bl_quantity AS quantity
+                       FROM vcn_export_cargo_declaration WHERE vcn_id=%s
+                       ORDER BY parcel_seq NULLS LAST, id''', (vcn_id,))
+    else:
+        cur.execute('''SELECT id, parcel_no, cargo_name, consigner_name, quantity
+                       FROM vcn_consigners WHERE vcn_id=%s
+                       ORDER BY parcel_seq NULLS LAST, id''', (vcn_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_export_parcel(row_id):
+    """Single export-cargo parcel — returns generated parcel_no after a save."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('SELECT id, parcel_no, parcel_seq FROM vcn_export_cargo_declaration WHERE id=%s', [row_id])
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def save_consigner(data):
     _clean_empty(data)
     conn = get_db()
@@ -286,14 +322,24 @@ def save_export_cargo_declaration(data):
                     data.get('bl_no'), data.get('bl_date'), data.get('bl_quantity'),
                     data.get('quantity_uom'), data['id']])
         row_id = data['id']
+        # backfill parcel_no if created before the VCN had a doc number
+        cur.execute('SELECT parcel_seq, parcel_no FROM vcn_export_cargo_declaration WHERE id=%s', [row_id])
+        cur_row = cur.fetchone()
+        if cur_row and cur_row['parcel_seq'] and not cur_row['parcel_no']:
+            cur.execute('UPDATE vcn_export_cargo_declaration SET parcel_no=%s WHERE id=%s',
+                        [_parcel_no(cur, data['vcn_id'], cur_row['parcel_seq']), row_id])
     else:
+        cur.execute('SELECT COALESCE(MAX(parcel_seq), 0) + 1 AS nxt FROM vcn_export_cargo_declaration WHERE vcn_id=%s',
+                    [data['vcn_id']])
+        seq = cur.fetchone()['nxt']
+        parcel_no = _parcel_no(cur, data['vcn_id'], seq)
         cur.execute('''INSERT INTO vcn_export_cargo_declaration (vcn_id, egm_shipping_bill_number, egm_shipping_bill_date,
-                       cargo_name, customer_name, bl_no, bl_date, bl_quantity, quantity_uom)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+                       cargo_name, customer_name, bl_no, bl_date, bl_quantity, quantity_uom, parcel_seq, parcel_no)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''',
                    [data['vcn_id'], data.get('egm_shipping_bill_number'), data.get('egm_shipping_bill_date'),
                     data.get('cargo_name'), data.get('customer_name'),
                     data.get('bl_no'), data.get('bl_date'), data.get('bl_quantity'),
-                    data.get('quantity_uom')])
+                    data.get('quantity_uom'), seq, parcel_no])
         row_id = cur.fetchone()['id']
     conn.commit()
     conn.close()
@@ -323,31 +369,15 @@ def get_export_cargo_total_quantity(vcn_id):
     return result or 0
 
 def get_export_loading_totals(vcn_id):
-    """Get loading totals from LDUD MV Anchorage Loading for a VCN, grouped by cargo_name for BL quantity"""
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('''SELECT vo.cargo_name, SUM(vo.quantity) as total_qty
-                   FROM ldud_vessel_operations vo
-                   JOIN ldud_header h ON vo.ldud_id = h.id
-                   WHERE h.vcn_id=%s AND vo.cargo_name IS NOT NULL
-                   GROUP BY vo.cargo_name''', (vcn_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return {r['cargo_name']: float(r['total_qty'] or 0) for r in rows}
+    """Loading totals per cargo. ponytail: ldud_vessel_operations was dropped
+    when LDUD01 moved to parcel-based ops; returns empty until re-sourced."""
+    return {}
 
 
 def get_hold_completion_by_vcn(vcn_id):
-    """Get hold completion data from all LDUDs linked to this VCN"""
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('''SELECT hc.*, h.doc_num as ldud_doc_num, h.operation_type
-                   FROM ldud_hold_completion hc
-                   JOIN ldud_header h ON hc.ldud_id = h.id
-                   WHERE h.vcn_id=%s
-                   ORDER BY h.id ASC, hc.id ASC''', (vcn_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """Hold completion across LDUDs for a VCN. ponytail: ldud_hold_completion
+    was dropped; returns empty until the parcel-based ops flow re-feeds it."""
+    return []
 
 
 # Approval functions

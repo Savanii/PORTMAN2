@@ -947,27 +947,24 @@
             lockBanner.style.display = 'none';
         }
 
-        // Export gets its cargo declaration section; import cargo is declared
-        // in the Consigner (Customer Details) table instead.
-        let cargoSection = '';
+        // Parcels source depends on operation type:
+        //   Export → Export Cargo Declaration rows (each is a parcel)
+        //   Import → Consigner (IGM line) rows (each is a parcel)
+        let parcelsSection = '';
         if (operationType === 'Export') {
-            cargoSection = `
+            parcelsSection = `
             <div class="sub-section">
                 <div class="sub-section-header" data-section="export_cargo">
-                    <span>Export Cargo Declaration</span>
+                    <span>Parcels (Export Cargo)</span>
                     <div class="sub-section-actions">
-                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('export_cargo', ${vcnId})">+ Add</button>` : ''}
+                        ${canAct ? `<button class="btn-sub-add" onclick="addSubRow('export_cargo', ${vcnId})">+ Add Parcel</button>` : ''}
                         ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('export_cargo', ${vcnId})">Save</button>` : ''}
                     </div>
                 </div>
                 <div class="sub-section-content"><div id="export-cargo-table-${vcnId}" class="sub-tabulator"></div></div>
             </div>`;
-        }
-
-        // Create the sub-table container
-        const subContainer = document.createElement('div');
-        subContainer.className = 'sub-table-container';
-        subContainer.innerHTML = `
+        } else {
+            parcelsSection = `
             <div class="sub-section">
                 <div class="sub-section-header" data-section="consigners">
                     <span>Parcels</span>
@@ -979,8 +976,14 @@
                     </div>
                 </div>
                 <div class="sub-section-content"><div id="consigners-table-${vcnId}" class="sub-tabulator"></div></div>
-            </div>
-            ${cargoSection}
+            </div>`;
+        }
+
+        // Create the sub-table container
+        const subContainer = document.createElement('div');
+        subContainer.className = 'sub-table-container';
+        subContainer.innerHTML = `
+            ${parcelsSection}
             <div class="sub-section">
                 <div class="sub-section-header" data-section="delays">
                     <span>Pre Berthing/Anchoring Delays</span>
@@ -1065,7 +1068,9 @@
         const consignerOptions = {};
         customers.forEach(c => { consignerOptions[c] = c; });
 
-        // One row per IGM (FORM III) line
+        // One row per IGM (FORM III) line — Import only (Export parcels live in
+        // the Export Cargo Declaration table; its section/div isn't rendered here).
+        if (operationType !== 'Export') {
         subTables[vcnId].consigners = new Tabulator(`#consigners-table-${vcnId}`, {
             layout: "fitColumns",
             height: 180,
@@ -1120,6 +1125,7 @@
             ].filter(Boolean)
         });
         if (isDark) document.querySelector(`#consigners-table-${vcnId}`).classList.add('tabulator-dark');
+        }
 
         // Delays table
         subTables[vcnId].delays = new Tabulator(`#delays-table-${vcnId}`, {
@@ -1179,9 +1185,9 @@
                 height: 150,
                 ajaxURL: `/api/module/VCN01/export_cargo/${vcnId}`,
                 columnDefaults: { headerSort: false },
-                dataLoaded: function() { updateExportCargoBLQuantities(vcnId); },
                 cellEdited: () => markDirty('export_cargo'),
                 columns: [
+                    {title: "Parcel No", field: "parcel_no", width: 130, headerSort: false},
                     {title: "EGM/Shipping Bill No", field: "egm_shipping_bill_number", widthGrow: 1, editor: canEdit ? "input" : false},
                     {title: "EGM/Shipping Bill Date", field: "egm_shipping_bill_date", widthGrow: 1, editor: canEdit ? dateEditor : false, formatter: dateCellFormatter},
                     {title: "Cargo Name", field: "cargo_name", widthGrow: 1, editor: canEdit ? "list" : false,
@@ -1192,10 +1198,11 @@
                     },
                     {title: "BL No", field: "bl_no", widthGrow: 1, editor: canEdit ? "input" : false},
                     {title: "BL Date", field: "bl_date", widthGrow: 1, editor: canEdit ? dateEditor : false, formatter: dateCellFormatter},
-                    {title: "BL Quantity", field: "bl_quantity", widthGrow: 1, editor: false, hozAlign: "right",
+                    {title: "BL Quantity", field: "bl_quantity", widthGrow: 1, editor: canEdit ? "number" : false, hozAlign: "right",
+                        editorParams: {min: 0, step: 0.01},
                         formatter: function(cell) {
                             const val = cell.getValue();
-                            return val != null ? parseFloat(val).toFixed(2) : '<span style="color:#999;font-style:italic">auto</span>';
+                            return val != null && val !== '' ? parseFloat(val).toFixed(2) : '';
                         }
                     },
                     {title: "Quantity UOM", field: "quantity_uom", widthGrow: 1, editor: canEdit ? "list" : false,
@@ -1209,31 +1216,6 @@
             if (isDark) document.querySelector(`#export-cargo-table-${vcnId}`).classList.add('tabulator-dark');
         }
 
-    }
-
-    async function updateExportCargoBLQuantities(vcnId) {
-        // Fetch loading totals from LDUD MV Anchorage Loading grouped by cargo_name
-        const res = await fetch(`/api/module/VCN01/export_loading_totals/${vcnId}`);
-        const qtyByCargo = await res.json(); // {cargo_name: total_qty}
-
-        // Update each export cargo row's bl_quantity based on its cargo_name
-        if (subTables[vcnId] && subTables[vcnId].export_cargo) {
-            const rows = subTables[vcnId].export_cargo.getRows();
-            for (const row of rows) {
-                const data = row.getData();
-                const cargoName = data.cargo_name;
-                const newQty = cargoName && qtyByCargo[cargoName] ? qtyByCargo[cargoName] : null;
-                if (data.bl_quantity != newQty) {
-                    row.update({bl_quantity: newQty});
-                    // Save updated BL quantity to server
-                    await fetch('/api/module/VCN01/export_cargo/save', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({...data, bl_quantity: newQty})
-                    });
-                }
-            }
-        }
     }
 
     function deleteButtonFormatter(cell) {
@@ -1281,7 +1263,7 @@
                     return {success: false, error: result.error};
                 }
                 // reflect the server-generated parcel number back onto the row
-                if (type === 'consigners' && result.parcel_no) {
+                if ((type === 'consigners' || type === 'export_cargo') && result.parcel_no) {
                     row.update({parcel_no: result.parcel_no, parcel_seq: result.parcel_seq});
                 }
                 return {success: true};
@@ -1297,11 +1279,6 @@
         if (errors.length > 0) {
             hasError = true;
             alert(`Error: ${errors[0].error}`);
-        }
-
-        // Refresh BL quantities from LDUD loading totals after export cargo save
-        if (type === 'export_cargo') {
-            updateExportCargoBLQuantities(vcnId);
         }
 
         if (!hasError) {

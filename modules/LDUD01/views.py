@@ -274,128 +274,33 @@ def delete():
     model.delete_header(request.json['id'])
     return jsonify({'success': True})
 
-# Delays sub-table endpoints
-@bp.route('/api/module/LDUD01/delays/<int:ldud_id>')
+# Parcel Operations sub-table endpoints
+@bp.route('/api/module/LDUD01/parcel_ops/<int:ldud_id>')
 @login_required
-def get_delays(ldud_id):
-    return jsonify(model.get_delays(ldud_id))
+def get_parcel_ops(ldud_id):
+    return jsonify(model.get_parcel_ops(ldud_id))
 
-@bp.route('/api/module/LDUD01/delays/save', methods=['POST'])
+@bp.route('/api/module/LDUD01/parcel_ops/save', methods=['POST'])
 @login_required
-def save_delay():
+def save_parcel_op():
     perms = get_perms()
     if not perms.get('can_add') and not perms.get('can_edit'):
         return jsonify({'error': 'No permission'}), 403
-    data = request.json
-    row_id, total_mins, total_hrs = model.save_delay(data)
-    return jsonify({'id': row_id, 'success': True, 'total_time_mins': total_mins, 'total_time_hrs': total_hrs})
-
-@bp.route('/api/module/LDUD01/delays/delete', methods=['POST'])
-@login_required
-def delete_delay():
-    perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
-    model.delete_delay(request.json['id'])
-    return jsonify({'success': True})
-
-# Anchorage Recording sub-table endpoints
-@bp.route('/api/module/LDUD01/anchorage/<int:ldud_id>')
-@login_required
-def get_anchorage(ldud_id):
-    return jsonify(model.get_anchorage(ldud_id))
-
-@bp.route('/api/module/LDUD01/anchorage/save', methods=['POST'])
-@login_required
-def save_anchorage():
-    perms = get_perms()
-    if not perms.get('can_add') and not perms.get('can_edit'):
-        return jsonify({'error': 'No permission'}), 403
-    row_id = model.save_anchorage(request.json)
+    try:
+        row_id = model.save_parcel_op(request.json)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     return jsonify({'id': row_id, 'success': True})
 
-@bp.route('/api/module/LDUD01/anchorage/delete', methods=['POST'])
+@bp.route('/api/module/LDUD01/parcel_ops/delete', methods=['POST'])
 @login_required
-def delete_anchorage():
+def delete_parcel_op():
     perms = get_perms()
     if not perms.get('can_delete'):
         return jsonify({'error': 'No permission to delete'}), 403
-    model.delete_anchorage(request.json['id'])
+    model.delete_parcel_op(request.json['id'])
     return jsonify({'success': True})
 
-# Vessel Operations sub-table endpoints
-@bp.route('/api/module/LDUD01/vessel_ops/<int:ldud_id>')
-@login_required
-def get_vessel_operations(ldud_id):
-    return jsonify(model.get_vessel_operations(ldud_id))
-
-@bp.route('/api/module/LDUD01/vessel_ops/save', methods=['POST'])
-@login_required
-def save_vessel_operation():
-    perms = get_perms()
-    if not perms.get('can_add') and not perms.get('can_edit'):
-        return jsonify({'error': 'No permission'}), 403
-    row_id = model.save_vessel_operation(request.json)
-    return jsonify({'id': row_id, 'success': True})
-
-@bp.route('/api/module/LDUD01/vessel_ops/delete', methods=['POST'])
-@login_required
-def delete_vessel_operation():
-    perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
-    model.delete_vessel_operation(request.json['id'])
-    return jsonify({'success': True})
-
-# Hold Completion sub-table endpoints
-@bp.route('/api/module/LDUD01/hold_completion/<int:ldud_id>')
-@login_required
-def get_hold_completion(ldud_id):
-    return jsonify(model.get_hold_completion(ldud_id))
-
-@bp.route('/api/module/LDUD01/hold_completion/save', methods=['POST'])
-@login_required
-def save_hold_completion():
-    perms = get_perms()
-    if not perms.get('can_add') and not perms.get('can_edit'):
-        return jsonify({'error': 'No permission'}), 403
-    data = request.json
-    if data.get('commenced') and data.get('completed'):
-        from datetime import datetime
-        try:
-            start = datetime.fromisoformat(data['commenced'].replace(' ', 'T'))
-            end = datetime.fromisoformat(data['completed'].replace(' ', 'T'))
-            if end <= start:
-                return jsonify({'error': 'Completed must be after Commenced'}), 400
-        except ValueError:
-            pass
-    row_id = model.save_hold_completion(data)
-    return jsonify({'id': row_id, 'success': True})
-
-@bp.route('/api/module/LDUD01/hold_completion/delete', methods=['POST'])
-@login_required
-def delete_hold_completion():
-    perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
-    model.delete_hold_completion(request.json['id'])
-    return jsonify({'success': True})
-
-# Hold Cargo Config endpoints
-@bp.route('/api/module/LDUD01/hold_cargo/<int:ldud_id>')
-@login_required
-def get_hold_cargo(ldud_id):
-    return jsonify(model.get_hold_cargo(ldud_id))
-
-@bp.route('/api/module/LDUD01/hold_cargo/save', methods=['POST'])
-@login_required
-def save_hold_cargo():
-    perms = get_perms()
-    if not perms.get('can_add') and not perms.get('can_edit'):
-        return jsonify({'error': 'No permission'}), 403
-    data = request.json
-    model.save_hold_cargo(data['ldud_id'], data['hold_name'], data.get('cargo_name', ''))
-    return jsonify({'success': True})
 
 
 # ── Proof of Quantity Documents (stored in DB as BYTEA) ──────────────────────
