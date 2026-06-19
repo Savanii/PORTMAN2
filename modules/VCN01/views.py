@@ -173,8 +173,9 @@ def save_consigner():
 @login_required
 def delete_consigner():
     perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
+    # sub-table rows are deletable by anyone who can edit/add (not gated on can_delete)
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission'}), 403
     model.delete_consigner(request.json.get('id'))
     return jsonify({'success': True})
 
@@ -197,8 +198,9 @@ def save_delay():
 @login_required
 def delete_delay():
     perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
+    # sub-table rows are deletable by anyone who can edit/add (not gated on can_delete)
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission'}), 403
     model.delete_delay(request.json.get('id'))
     return jsonify({'success': True})
 
@@ -251,8 +253,9 @@ def save_export_cargo():
 @login_required
 def delete_export_cargo():
     perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
+    # sub-table rows are deletable by anyone who can edit/add (not gated on can_delete)
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission'}), 403
     model.delete_export_cargo_declaration(request.json.get('id'))
     return jsonify({'success': True})
 

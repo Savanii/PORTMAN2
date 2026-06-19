@@ -296,8 +296,9 @@ def save_parcel_op():
 @login_required
 def delete_parcel_op():
     perms = get_perms()
-    if not perms.get('can_delete'):
-        return jsonify({'error': 'No permission to delete'}), 403
+    # sub-table rows are deletable by anyone who can edit/add (not gated on can_delete)
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission'}), 403
     model.delete_parcel_op(request.json['id'])
     return jsonify({'success': True})
 
