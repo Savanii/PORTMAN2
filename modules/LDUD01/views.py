@@ -123,7 +123,10 @@ def save():
     else:
         data['doc_status'] = 'Draft'
 
-    row_id, doc_num = model.save_header(data)
+    try:
+        row_id, doc_num = model.save_header(data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     return jsonify({'id': row_id, 'doc_num': doc_num, 'doc_status': data.get('doc_status', 'Draft')})
 
 

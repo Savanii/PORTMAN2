@@ -436,8 +436,10 @@ def build_consigner_rows(ev):
                 'quantity':        qty,
                 'consigner_name':  consignee,
                 'importer_name':   consignee,
-                'pipeline_name':   _pick(tanks, i),
-                'unload_terminal': terminal,
+                # pipeline + unload terminal are NOT autofilled on the EV01→VCN move;
+                # the operator selects them per parcel in VCN01.
+                'pipeline_name':   None,
+                'unload_terminal': None,
             })
     return rows
 

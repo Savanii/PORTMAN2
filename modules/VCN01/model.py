@@ -28,10 +28,11 @@ def get_vessels():
     """Get vessels from VC01 for dropdown"""
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('SELECT doc_num, vessel_name FROM vessels ORDER BY doc_num')
+    cur.execute('SELECT doc_num, vessel_name, pbl FROM vessels ORDER BY doc_num')
     rows = cur.fetchall()
     conn.close()
-    return [{'value': f"{r['doc_num']}/{r['vessel_name']}", 'doc_num': r['doc_num'], 'vessel_name': r['vessel_name']} for r in rows]
+    return [{'value': f"{r['doc_num']}/{r['vessel_name']}", 'doc_num': r['doc_num'],
+             'vessel_name': r['vessel_name'], 'pbl': r['pbl']} for r in rows]
 
 def get_data(page=1, size=20, filters=None):
     conn = get_db()
@@ -97,6 +98,14 @@ def save_header(data):
         cur.execute(f"INSERT INTO vcn_header ({', '.join(cols)}) VALUES ({', '.join(['%s']*len(cols))}) RETURNING id",
                    [data[c] for c in cols])
         row_id = cur.fetchone()['id']
+
+    # PBL entered on the VCN flows back to the VC01 vessel master (one-way; only
+    # when provided, so a blank never clears the master). vessel_master_doc is
+    # 'DOCNUM/NAME' — match the vessel by its doc_num.
+    pbl = data.get('pbl')
+    vmd = data.get('vessel_master_doc')
+    if pbl not in (None, '') and vmd:
+        cur.execute('UPDATE vessels SET pbl=%s WHERE doc_num=%s', [pbl, str(vmd).split('/', 1)[0]])
 
     conn.commit()
     conn.close()

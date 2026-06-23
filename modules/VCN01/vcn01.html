@@ -782,13 +782,16 @@
                     const val = cell.getValue();
                     const vessel = vessels.find(v => v.value === val);
                     if (vessel) {
-                        cell.getRow().update({vessel_name: vessel.vessel_name});
+                        // prefill PBL from the VC01 master (editing it here writes back on save)
+                        cell.getRow().update({vessel_name: vessel.vessel_name, pbl: vessel.pbl});
                     }
                 }
             },
             {title: "Vessel Name", field: "vessel_name", width: 130},
             {title: "LOA", field: "loa", editor: canEdit ? "number" : false, width: 75, hozAlign: "right"},
             {title: "DFT", field: "draft", editor: canEdit ? "number" : false, width: 70, hozAlign: "right"},
+            {title: "PBL", field: "pbl", editor: canEdit ? "number" : false, width: 75, hozAlign: "right",
+                editorParams: {step: 0.01}, headerTooltip: "Parallel Body Length — saved back to VC01 vessel master"},
             {title: "Berth", field: "berth_name", width: 100, editor: canEdit ? "list" : false,
                 editorParams: function() { return {values: berthNames, autocomplete: true, allowEmpty: true, listOnEmpty: true}; }},
             {title: "Vessel Agent", field: "vessel_agent_name", editor: canEdit ? "list" : false,
@@ -1105,9 +1108,10 @@
                     editorParams: {values: consignerOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true}
                 },
                 {title: "Pipeline", field: "pipeline_name", widthGrow: 1, formatter: cargoPillFormatter,
-                    editor: canEdit ? makeMultiSelectEditor(pipelineNames) : false,
+                    editor: canEdit ? "list" : false,
+                    editorParams: {values: pipelineNames, autocomplete: true, allowEmpty: true, listOnEmpty: true},
                     cellEdited: function(cell) {
-                        // pipeline is the parent — drop terminals no longer mapped to it
+                        // one pipeline per parcel — drop terminals no longer mapped to it
                         const row = cell.getRow();
                         const allowed = terminalsForRow(row.getData());
                         const kept = _splitMulti(row.getData().unload_terminal).filter(t => allowed.includes(t));

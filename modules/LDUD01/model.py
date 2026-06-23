@@ -44,11 +44,13 @@ def get_vcn_list():
     """Get all approved VCN entries with doc date and operation type for dropdown"""
     conn = get_db()
     cur = get_cursor(conn)
+    # One LDUD per VCN — drop VCNs already linked to an LDUD from the picker.
     cur.execute('''
         SELECT h.id, h.vcn_doc_num, h.vessel_name, h.doc_date, h.operation_type, a.anchorage_arrival
         FROM vcn_header h
         LEFT JOIN vcn_anchorage a ON a.vcn_id = h.id
         WHERE h.doc_status = 'Approved'
+          AND h.id NOT IN (SELECT vcn_id FROM ldud_header WHERE vcn_id IS NOT NULL)
         ORDER BY h.vcn_doc_num DESC
     ''')
     rows = cur.fetchall()
@@ -178,6 +180,14 @@ def save_header(data):
     for k in data:
         if data[k] == '':
             data[k] = None
+
+    # One-to-one: a VCN may be linked to at most one LDUD (DB-enforced too).
+    if data.get('vcn_id'):
+        cur.execute('SELECT id FROM ldud_header WHERE vcn_id=%s AND id IS DISTINCT FROM %s',
+                    [data['vcn_id'], row_id])
+        if cur.fetchone():
+            conn.close()
+            raise ValueError('This VCN is already linked to another LDUD (one LDUD per VCN).')
 
     if row_id:
         _computed = {'id', 'doc_num', 'vcn_display', 'vcn_doc_date', 'vcn_doc_status', 'cargo_names_display', 'bl_quantities_display',

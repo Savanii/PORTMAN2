@@ -1274,6 +1274,16 @@
             return parcelById[id] || null;
         };
 
+        // distinct cargo names off the VCN parcel lines, and parcels filtered by cargo
+        const cargoOpts = [...new Set(parcelList.map(p => p.cargo_name).filter(Boolean))];
+        const parcelsForCargo = function(cargo) {
+            const opts = {};
+            parcelList.forEach(p => {
+                if (!cargo || p.cargo_name === cargo) opts[p.id] = `${p.parcel_no || ('#' + p.id)} — ${p.cargo_name || ''}`;
+            });
+            return opts;
+        };
+
         subTables[ldudId].parcel_ops = new Tabulator(`#parcel_ops-table-${ldudId}`, {
             layout: "fitColumns",
             height: 200,
@@ -1281,16 +1291,29 @@
             columnDefaults: { headerSort: false },
             cellEdited: () => markDirty('parcel_ops'),
             columns: [
-                {title: "Parcel", field: "parcel_ids", widthGrow: 2,
+                {title: "Cargo", field: "cargo_name", widthGrow: 1.2,
                     editor: canEdit ? "list" : false,
-                    editorParams: {values: parcelOptions, autocomplete: true, allowEmpty: true, listOnEmpty: true},
+                    editorParams: {values: cargoOpts, autocomplete: true, allowEmpty: true, listOnEmpty: true},
+                    cellEdited: function(cell) {
+                        // cargo filters the parcel picker — clear dependent fields
+                        cell.getRow().update({parcel_ids: '', terminal_name: '', quantity: ''});
+                    }},
+                {title: "Parcel", field: "parcel_ids", widthGrow: 1.8,
+                    editor: canEdit ? "list" : false,
+                    editorParams: function(cell) {
+                        return {values: parcelsForCargo(cell.getRow().getData().cargo_name),
+                                autocomplete: true, allowEmpty: true, listOnEmpty: true};
+                    },
                     formatter: parcelOpsFormatter,
                     cellEdited: function(cell) {
                         const p = parcelById[String(cell.getValue() || '').split(',')[0].trim()];
-                        // picking a parcel sets its cargo and resets the terminal choice
-                        cell.getRow().update({cargo_name: p ? (p.cargo_name || '') : '', terminal_name: ''});
+                        // fetch parcel-wise quantity + cargo; reset terminal for the new parcel
+                        cell.getRow().update({
+                            cargo_name: p ? (p.cargo_name || '') : cell.getRow().getData().cargo_name,
+                            terminal_name: '',
+                            quantity: (p && p.quantity != null) ? p.quantity : ''
+                        });
                     }},
-                {title: "Cargo", field: "cargo_name", widthGrow: 1},
                 {title: "Terminal", field: "terminal_name", widthGrow: 1.2,
                     editor: canEdit ? "list" : false,
                     editorParams: function(cell) {
@@ -1452,6 +1475,8 @@
                 if (result.id) {
                     row.update({id: result.id, doc_num: result.doc_num, doc_status: result.doc_status});
                     savedCount++;
+                } else if (result.error) {
+                    alert(result.error);
                 }
             }
             dirtyRowIds.clear();
