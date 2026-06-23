@@ -88,18 +88,21 @@
     const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return `${p(dt.getDate())} ${mon[dt.getMonth()]} ${dt.getFullYear()}, ${p(dt.getHours())}:${p(dt.getMinutes())}`;
   }
-  function etcText(rate, remaining) {           // estimated completion as a date-time
-    if (!(rate > 0) || !(remaining > 0)) return '';
-    return fmtDateTime(new Date(Date.now() + (remaining / rate) * 3600 * 1000));
+  // ETC = parcel Start + total time to discharge the full target at the avg rate.
+  function etcText(rate, target, startDt) {
+    if (!(rate > 0) || !startDt) return '';
+    const start = new Date(startDt);
+    if (isNaN(start)) return '';
+    return fmtDateTime(new Date(start.getTime() + (target / rate) * 3600 * 1000));
   }
   function metricsChip(label, val) {
     return `<span style="display:inline-flex;align-items:baseline;gap:4px;background:#f1f5f9;border-radius:999px;`
       + `padding:1px 9px;margin-right:5px;font-size:11px;"><span style="color:#64748b;">${label}</span>`
       + `<b style="color:#0f172a;">${val}</b></span>`;
   }
-  function metricsHTML(rate, hours, remaining) {
+  function metricsHTML(rate, hours, remaining, startDt, target) {
     let html = metricsChip('Avg', `${(+rate).toFixed(1)} MT/Hr`) + metricsChip('Run', `${(+hours).toFixed(1)} h`);
-    const etc = etcText(rate, remaining);
+    const etc = (remaining > 0) ? etcText(rate, target, startDt) : '';
     if (etc) html += metricsChip('ETC', etc);
     if (remaining < 0) html += `<span style="color:#dc2626;font-weight:600;font-size:11px;">over by ${r3(Math.abs(remaining))}</span>`;
     return html;
@@ -116,10 +119,10 @@
       const d = row.getData();
       cum += parseFloat(d.quantity || 0) || 0;
       hours += rowHours(d.from_time, d.to_time);
-      row.update({_total: r3(cum), _remaining: r3(target - cum)});
     });
+    t.getRows().forEach(r => r.reformat());   // refresh self-computing Total/Rem cells
     const m = document.getElementById(`metrics-${pid}`);
-    if (m) m.innerHTML = metricsHTML(hours > 0 ? cum / hours : 0, hours, target - cum);
+    if (m) m.innerHTML = metricsHTML(hours > 0 ? cum / hours : 0, hours, target - cum, parcelStart[pid], target);
   }
 
   // When a parcel's logged total reaches its target, auto-set its End to the last
@@ -267,7 +270,7 @@
         <div class="parcel-head" onclick="toggleParcel(${p.parcel_op_id})">
           <div><b>${p.parcel_no}</b> — ${p.cargo_name}${term}
             <span id="status-${p.parcel_op_id}" style="font-size:11px;font-weight:600;color:${statusColor};margin-left:6px;">● ${p.status}</span>
-            <span id="metrics-${p.parcel_op_id}" style="margin-left:10px;">${metricsHTML(p.avg_rate, p.op_hours, p.remaining_qty)}</span></div>
+            <span id="metrics-${p.parcel_op_id}" style="margin-left:10px;">${metricsHTML(p.avg_rate, p.op_hours, p.remaining_qty, p.start_dt, p.target_qty)}</span></div>
           <div class="progress-pill">${p.logged_qty} / ${p.target_qty} ${p.uom} (${pct}%)</div>
         </div>
         <div id="log-wrap-${p.parcel_op_id}" style="display:${open ? 'block' : 'none'};padding:0 8px 8px;">
@@ -294,10 +297,18 @@
     saveSel();
   }
 
+  // Total/Remaining are computed live from the quantity column (not stored), so
+  // they can never go stale/blank: cumulative qty up to this row, and target-cum.
+  function _cumQty(table, row) {
+    let cum = 0;
+    for (const r of table.getRows()) { cum += parseFloat(r.getData().quantity || 0) || 0; if (r === row) break; }
+    return cum;
+  }
+  const _totalFmt = function(c) { return r3(_cumQty(c.getTable(), c.getRow())); };
   const _remFmt = function(c) {
-    const v = c.getValue();
-    if (v == null) return '';
-    return `<span style="color:${v < 0 ? '#dc2626' : '#1f2937'}">${v}</span>`;
+    const target = parcelTargets[c.getRow().getData().parcel_op_id] || 0;
+    const rem = r3(target - _cumQty(c.getTable(), c.getRow()));
+    return `<span style="color:${rem < 0 ? '#dc2626' : '#1f2937'}">${rem}</span>`;
   };
 
   function logColumns() {
@@ -307,8 +318,7 @@
       {title: "To", field: "to_time", editor: canEdit ? "input" : false, width: 60, cellEdited: validateTimeCell},
       {title: "Last Hr", field: "quantity", editor: canEdit ? "number" : false, hozAlign: "right", width: 70,
         editorParams: {min: 0, step: 0.01}, cellEdited: clampQty},
-      {title: "Total", field: "_total", hozAlign: "right", width: 70,
-        formatter: c => c.getValue() == null ? '' : c.getValue()},
+      {title: "Total", field: "_total", hozAlign: "right", width: 70, formatter: _totalFmt},
       {title: "Rem", field: "_remaining", hozAlign: "right", width: 72, formatter: _remFmt},
       {title: "Press", field: "pressure", editor: canEdit ? "number" : false, hozAlign: "right", width: 58,
         editorParams: {step: 0.01}},
@@ -346,6 +356,8 @@
   }
 
   function currentShift() { const h = new Date().getHours(); return h >= 6 && h < 14 ? 'A' : h >= 14 && h < 22 ? 'B' : 'C'; }
+  function _tmin(hhmm) { const a = String(hhmm).split(':'); return (+a[0] || 0) * 60 + (+a[1] || 0); }
+  function _addDays(dateStr, n) { const d = new Date(dateStr + 'T00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
 
   function addLogRow(pid, defaultBerth) {
     const t = subTables[pid];
@@ -356,8 +368,12 @@
     let date, from;
     if (rows.length) {
       const prev = rows[rows.length - 1].getData();
-      date = prev.entry_date || (start ? start.slice(0, 10) : new Date().toISOString().slice(0, 10));
       from = prev.to_time || '';
+      const baseDate = prev.entry_date || (start ? start.slice(0, 10) : new Date().toISOString().slice(0, 10));
+      // if the previous interval crossed midnight (To < From, e.g. 23:00 → 00:00),
+      // the next row starts on the next day
+      const wrapped = prev.from_time && prev.to_time && _tmin(prev.to_time) < _tmin(prev.from_time);
+      date = wrapped ? _addDays(baseDate, 1) : baseDate;
     } else {
       date = start ? start.slice(0, 10) : new Date().toISOString().slice(0, 10);
       from = start ? start.slice(11, 16) : '';
