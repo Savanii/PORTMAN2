@@ -157,13 +157,21 @@ def get_parcels(vcn_id):
     } for p in model.get_picker_parcels(vcn_id)]
     return jsonify(parcels)
 
+@bp.route('/api/module/VCN01/cargo_quotas/<int:vcn_id>')
+@login_required
+def get_cargo_quotas(vcn_id):
+    return jsonify(model.get_cargo_quotas(vcn_id))
+
 @bp.route('/api/module/VCN01/consigners/save', methods=['POST'])
 @login_required
 def save_consigner():
     perms = get_perms()
     if not perms.get('can_add') and not perms.get('can_edit'):
         return jsonify({'error': 'No permission'}), 403
-    row_id = model.save_consigner(request.json)
+    try:
+        row_id = model.save_consigner(request.json)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     parcel = model.get_parcel(row_id) or {}
     return jsonify({'success': True, 'id': row_id,
                     'parcel_no': parcel.get('parcel_no'),

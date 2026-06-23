@@ -1262,26 +1262,81 @@
         // so quantities can differ per terminal. Single-select parcel picker;
         // the Terminal dropdown is driven by the picked parcel's terminals.
         const parcelOpsFormatter = function(cell) {
-            const id = String(cell.getValue() || '').split(',')[0].trim();
-            if (!id) return '<span style="color:#94a3b8;">—</span>';
-            const p = parcelById[id];
-            const label = p ? (p.parcel_no || ('#' + id)) : ('#' + id);
-            return `<span style="background:#3182ce;color:white;padding:1px 6px;border-radius:3px;font-size:10px;">${label}</span>`;
+            const ids = String(cell.getValue() || '').split(',').map(s => s.trim()).filter(Boolean);
+            if (!ids.length) return '<span style="color:#94a3b8;">—</span>';
+            return ids.map(id => {
+                const p = parcelById[id];
+                const label = p ? (p.parcel_no || ('#' + id)) : ('#' + id);
+                return `<span style="background:#3182ce;color:white;padding:1px 6px;border-radius:3px;font-size:10px;margin-right:3px;">${label}</span>`;
+            }).join('');
         };
 
-        const rowParcel = function(cell) {
-            const id = String(cell.getRow().getData().parcel_ids || '').split(',')[0].trim();
-            return parcelById[id] || null;
-        };
-
-        // distinct cargo names off the VCN parcel lines, and parcels filtered by cargo
+        // distinct cargo names off the VCN parcel lines
         const cargoOpts = [...new Set(parcelList.map(p => p.cargo_name).filter(Boolean))];
-        const parcelsForCargo = function(cargo) {
-            const opts = {};
-            parcelList.forEach(p => {
-                if (!cargo || p.cargo_name === cargo) opts[p.id] = `${p.parcel_no || ('#' + p.id)} — ${p.cargo_name || ''}`;
+
+        // Multi-select parcel picker, filtered to the row's cargo. Picking several
+        // parcels sums their quantities into the row (one cargo per row).
+        const parcelMultiEditor = function(cell, onRendered, success, cancel) {
+            const cargo = cell.getRow().getData().cargo_name;
+            const selected = new Set(String(cell.getValue() || '').split(',').map(s => s.trim()).filter(Boolean));
+            const candidates = parcelList.filter(p => !cargo || p.cargo_name === cargo);
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = 'width:100%;height:100%;display:flex;align-items:center;padding:0 6px;font-size:11px;';
+            wrapper.textContent = selected.size ? `${selected.size} parcel(s)` : (cargo ? 'Pick parcels…' : 'Pick a cargo first');
+            const dd = document.createElement('div');
+            dd.style.cssText = 'position:fixed;z-index:10000;background:white;border:1px solid #cbd5e1;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.18);padding:8px;display:none;max-height:280px;overflow:auto;min-width:240px;';
+            if (!candidates.length) {
+                const m = document.createElement('div');
+                m.style.cssText = 'font-size:11px;color:#64748b;padding:4px;';
+                m.textContent = cargo ? 'No parcels for this cargo.' : 'Select a cargo first.';
+                dd.appendChild(m);
+            }
+            const boxes = [];
+            candidates.forEach(p => {
+                const lbl = document.createElement('label');
+                lbl.style.cssText = 'display:flex;gap:6px;align-items:center;padding:3px 4px;font-size:11px;cursor:pointer;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.value = String(p.id); cb.checked = selected.has(String(p.id));
+                cb.style.cssText = 'margin:0;width:14px;height:14px;cursor:pointer;';
+                lbl.appendChild(cb);
+                lbl.appendChild(document.createTextNode(`${p.parcel_no || ('#' + p.id)}${p.quantity != null ? ' — ' + p.quantity + ' MT' : ''}`));
+                dd.appendChild(lbl); boxes.push(cb);
             });
-            return opts;
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;';
+            const apply = document.createElement('button');
+            apply.textContent = 'Apply';
+            apply.style.cssText = 'flex:1;padding:4px 8px;font-size:11px;background:#3182ce;color:white;border:none;border-radius:4px;cursor:pointer;';
+            apply.addEventListener('click', function(e) {
+                e.stopPropagation();
+                const ids = boxes.filter(b => b.checked).map(b => b.value);
+                let qty = 0;
+                ids.forEach(id => { const p = parcelById[id]; if (p && p.quantity != null) qty += parseFloat(p.quantity) || 0; });
+                // picking parcels sums quantity and resets terminal; cargo already set on the row
+                cell.getRow().update({terminal_name: '', quantity: ids.length ? Math.round(qty * 1000) / 1000 : ''});
+                cleanup(); success(ids.join(','));
+            });
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'flex:1;padding:4px 8px;font-size:11px;background:#e2e8f0;color:#374151;border:none;border-radius:4px;cursor:pointer;';
+            cancelBtn.addEventListener('click', function(e) { e.stopPropagation(); cleanup(); cancel(); });
+            btnRow.appendChild(apply); btnRow.appendChild(cancelBtn); dd.appendChild(btnRow);
+            document.body.appendChild(dd);
+            function cleanup() { if (dd.parentNode) dd.parentNode.removeChild(dd); document.removeEventListener('mousedown', outside); }
+            function outside(e) { if (!dd.contains(e.target) && !wrapper.contains(e.target)) { cleanup(); cancel(); } }
+            onRendered(function() {
+                const rect = cell.getElement().getBoundingClientRect();
+                dd.style.left = rect.left + 'px'; dd.style.top = (rect.bottom + 2) + 'px'; dd.style.display = 'block';
+                setTimeout(() => document.addEventListener('mousedown', outside), 10);
+            });
+            return wrapper;
+        };
+        // terminals available for a row = union of the selected parcels' terminals
+        const rowTerminals = function(cell) {
+            const ids = String(cell.getRow().getData().parcel_ids || '').split(',').map(s => s.trim()).filter(Boolean);
+            const set = new Set();
+            ids.forEach(id => { const p = parcelById[id]; (p && p.terminals || []).forEach(t => set.add(t)); });
+            return [...set];
         };
 
         subTables[ldudId].parcel_ops = new Tabulator(`#parcel_ops-table-${ldudId}`, {
@@ -1298,27 +1353,13 @@
                         // cargo filters the parcel picker — clear dependent fields
                         cell.getRow().update({parcel_ids: '', terminal_name: '', quantity: ''});
                     }},
-                {title: "Parcel", field: "parcel_ids", widthGrow: 1.8,
-                    editor: canEdit ? "list" : false,
-                    editorParams: function(cell) {
-                        return {values: parcelsForCargo(cell.getRow().getData().cargo_name),
-                                autocomplete: true, allowEmpty: true, listOnEmpty: true};
-                    },
-                    formatter: parcelOpsFormatter,
-                    cellEdited: function(cell) {
-                        const p = parcelById[String(cell.getValue() || '').split(',')[0].trim()];
-                        // fetch parcel-wise quantity + cargo; reset terminal for the new parcel
-                        cell.getRow().update({
-                            cargo_name: p ? (p.cargo_name || '') : cell.getRow().getData().cargo_name,
-                            terminal_name: '',
-                            quantity: (p && p.quantity != null) ? p.quantity : ''
-                        });
-                    }},
+                {title: "Parcel(s)", field: "parcel_ids", widthGrow: 1.8,
+                    editor: canEdit ? parcelMultiEditor : false,
+                    formatter: parcelOpsFormatter},
                 {title: "Terminal", field: "terminal_name", widthGrow: 1.2,
                     editor: canEdit ? "list" : false,
                     editorParams: function(cell) {
-                        const p = rowParcel(cell);
-                        return {values: (p && p.terminals) || [], autocomplete: true, allowEmpty: true, listOnEmpty: true};
+                        return {values: rowTerminals(cell), autocomplete: true, allowEmpty: true, listOnEmpty: true};
                     }},
                 {title: "Quantity", field: "quantity", widthGrow: 1, hozAlign: "right",
                     editor: canEdit ? "number" : false, editorParams: {min: 0, step: 0.01}},

@@ -507,11 +507,12 @@
         return v ? String(v).split(/[,;]/).map(s => s.trim()).filter(Boolean) : [];
     }
 
-    // Terminals allowed for the pipelines selected on a consigner row (PLTM01).
-    // Falls back to all terminals when no pipeline / no mapping is defined.
+    // Terminals allowed for the pipeline selected on a consigner row (PLTM01).
+    // No pipeline → no terminals (terminal is locked until a pipeline is chosen).
+    // A selected pipeline with no mapping falls back to all terminals.
     function terminalsForRow(rowData) {
         const pipes = _splitMulti(rowData && rowData.pipeline_name);
-        if (!pipes.length) return terminalNames.slice();
+        if (!pipes.length) return [];
         const set = [];
         pipes.forEach(p => (pipelineTerminalMap[p] || []).forEach(t => {
             if (!set.includes(t)) set.push(t);
@@ -976,7 +977,10 @@
                         ${canAct ? `<button class="btn-sub-save" onclick="saveSubTable('consigners', ${vcnId})">Save</button>` : ''}
                     </div>
                 </div>
-                <div class="sub-section-content"><div id="consigners-table-${vcnId}" class="sub-tabulator"></div></div>
+                <div class="sub-section-content">
+                    <div id="cargo-quota-${vcnId}" style="padding:6px 10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11px;"></div>
+                    <div id="consigners-table-${vcnId}" class="sub-tabulator"></div>
+                </div>
             </div>`;
         }
 
@@ -1077,6 +1081,7 @@
             height: 180,
             ajaxURL: `/api/module/VCN01/consigners/${vcnId}`,
             columnDefaults: { headerSort: false },
+            dataLoaded: function() { renderCargoQuotas(vcnId); },
             cellEdited: () => markDirty('consigners'),
             columns: [
                 {title: "Parcel No", field: "parcel_no", width: 130, headerSort: false},
@@ -1118,8 +1123,15 @@
                         row.update({unload_terminal: kept.join(', ')});
                     }
                 },
-                {title: "Unload Terminal", field: "unload_terminal", widthGrow: 1.2, formatter: cargoPillFormatter,
-                    editor: canEdit ? makeMultiSelectEditor(cell => terminalsForRow(cell.getRow().getData())) : false
+                {title: "Unload Terminal", field: "unload_terminal", widthGrow: 1.2,
+                    formatter: function(cell) {
+                        if (!_splitMulti(cell.getRow().getData().pipeline_name).length)
+                            return '<span style="color:#cbd5e1;font-style:italic;">select pipeline first</span>';
+                        return cargoPillFormatter(cell);
+                    },
+                    editor: canEdit ? makeMultiSelectEditor(cell => terminalsForRow(cell.getRow().getData())) : false,
+                    // terminal is only selectable once a pipeline is chosen (PLTM01 mapping drives the options)
+                    editable: function(cell) { return canEdit && _splitMulti(cell.getRow().getData().pipeline_name).length > 0; }
                 },
                 canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 60, widthGrow: 0, hozAlign: "center", headerSort: false,
                     cellClick: function(e, cell) { deleteSubRow('consigners', cell.getRow().getData().id, vcnId); }
@@ -1224,6 +1236,22 @@
         return '<button class="btn-sub-delete">X</button>';
     }
 
+    // Per-cargo available/allocated/remaining (only shown when quotas were captured,
+    // i.e. the VCN came from an EV01 move). Parcels can't exceed the available total.
+    async function renderCargoQuotas(vcnId) {
+        const el = document.getElementById(`cargo-quota-${vcnId}`);
+        if (!el) return;
+        let quotas = [];
+        try { quotas = await fetch(`/api/module/VCN01/cargo_quotas/${vcnId}`).then(r => r.json()); } catch (e) {}
+        if (!quotas.length) { el.innerHTML = ''; return; }
+        el.innerHTML = '<span style="font-weight:600;color:#1e40af;margin-right:4px;">Available per cargo:</span>' +
+            quotas.map(q => {
+                const color = q.remaining < 0 ? '#dc2626' : (q.remaining === 0 ? '#15803d' : '#374151');
+                return `<span style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:4px;padding:2px 6px;">
+                    <b>${q.cargo_name}</b>: ${q.allocated}/${q.total_qty} <span style="color:${color}">(rem ${q.remaining})</span></span>`;
+            }).join('');
+    }
+
     async function addSubRow(type, vcnId) {
         const res = await fetch(`/api/module/VCN01/${type}/save`, {
             method: 'POST',
@@ -1282,6 +1310,7 @@
             hasError = true;
             alert(`Error: ${errors[0].error}`);
         }
+        if (type === 'consigners') renderCargoQuotas(vcnId);   // refresh available-per-cargo
 
         if (!hasError) {
             clearDirty(type);
@@ -1300,6 +1329,7 @@
             const row = subTables[vcnId][type].getRows().find(r => r.getData().id === id);
             if (row) row.delete();
         }
+        if (type === 'consigners') renderCargoQuotas(vcnId);
     }
 
     function addRow() {

@@ -139,6 +139,9 @@ def move_to_vcn(ev_id):
         'doc_date':          str(ev.get('eta').date()) if ev.get('eta') else None,
     }
     vcn_id, vcn_doc_num = vcn_model.save_header(vcn_data)
+    # Per-cargo totals (available-to-allocate) captured before parcels are saved,
+    # so the parcel-quantity validation has a quota to check against.
+    vcn_model.save_cargo_quotas(vcn_id, model.cargo_quotas(ev))
     for row in model.build_consigner_rows(ev):
         row['vcn_id'] = vcn_id
         vcn_model.save_consigner(row)

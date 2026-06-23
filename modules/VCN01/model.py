@@ -200,10 +200,34 @@ def get_export_parcel(row_id):
     return dict(row) if row else None
 
 
+def _parse_qty(v):
+    try:
+        return float(str(v).replace(',', '')) if v not in (None, '') else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def save_consigner(data):
     _clean_empty(data)
     conn = get_db()
     cur = get_cursor(conn)
+    # Quota guard: total parcels for a cargo can't exceed its captured per-cargo
+    # quantity (only enforced when a quota exists for that cargo on this VCN).
+    cargo = data.get('cargo_name')
+    if data.get('vcn_id') and cargo:
+        cur.execute('SELECT total_qty FROM vcn_cargo_quota WHERE vcn_id=%s AND cargo_name=%s',
+                    [data['vcn_id'], cargo])
+        q = cur.fetchone()
+        if q and q['total_qty'] is not None:
+            cur.execute('SELECT id, quantity FROM vcn_consigners WHERE vcn_id=%s AND cargo_name=%s',
+                        [data['vcn_id'], cargo])
+            others = sum(_parse_qty(r['quantity']) for r in cur.fetchall()
+                         if not (data.get('id') and r['id'] == data['id']))
+            new_total = others + _parse_qty(data.get('quantity'))
+            if new_total > float(q['total_qty']) + 1e-6:
+                conn.close()
+                raise ValueError(f"{cargo} parcels total {round(new_total, 3)} exceed available "
+                                 f"{round(float(q['total_qty']), 3)}.")
     if data.get('id'):
         cur.execute(f"UPDATE vcn_consigners SET {', '.join(f'{c}=%s' for c in _CONSIGNER_COLS)} WHERE id=%s",
                    [data.get(c) for c in _CONSIGNER_COLS] + [data['id']])
@@ -231,6 +255,39 @@ def save_consigner(data):
 
 # back-compat alias
 save_parcel = save_consigner
+
+
+def save_cargo_quotas(vcn_id, quotas):
+    """Upsert per-cargo totals {cargo_name: qty} for a VCN (captured on EV01 move)."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    for cargo, qty in (quotas or {}).items():
+        cur.execute('''INSERT INTO vcn_cargo_quota (vcn_id, cargo_name, total_qty)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (vcn_id, cargo_name) DO UPDATE SET total_qty = EXCLUDED.total_qty''',
+                    [vcn_id, cargo, qty])
+    conn.commit()
+    conn.close()
+
+
+def get_cargo_quotas(vcn_id):
+    """Per-cargo available/allocated/remaining for a VCN's parcel allocation."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('SELECT cargo_name, total_qty FROM vcn_cargo_quota WHERE vcn_id=%s ORDER BY cargo_name', [vcn_id])
+    quotas = [dict(r) for r in cur.fetchall()]
+    cur.execute('SELECT cargo_name, quantity FROM vcn_consigners WHERE vcn_id=%s', [vcn_id])
+    alloc = {}
+    for r in cur.fetchall():
+        alloc[r['cargo_name']] = alloc.get(r['cargo_name'], 0.0) + _parse_qty(r['quantity'])
+    conn.close()
+    out = []
+    for q in quotas:
+        total = float(q['total_qty'] or 0)
+        a = round(alloc.get(q['cargo_name'], 0.0), 3)
+        out.append({'cargo_name': q['cargo_name'], 'total_qty': round(total, 3),
+                    'allocated': a, 'remaining': round(total - a, 3)})
+    return out
 
 def save_igm_document(vcn_id, filename, file_bytes):
     conn = get_db()

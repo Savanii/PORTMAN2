@@ -428,20 +428,40 @@ def build_consigner_rows(ev):
     rows = []
     line_no = 0
     for i, consignee in enumerate(consignees or [None]):
-        for cargo, qty in _cargo_items(i):
+        for cargo, _qty in _cargo_items(i):
             line_no += 1
             rows.append({
                 'igm_line_no':     str(line_no),
                 'cargo_name':      cargo,
-                'quantity':        qty,
+                # quantity, pipeline and unload terminal are NOT autofilled on the
+                # EV01→VCN move (the per-cargo total was being duplicated across
+                # consignees). The operator allocates per parcel in VCN01, validated
+                # against the per-cargo quota captured below.
+                'quantity':        None,
                 'consigner_name':  consignee,
                 'importer_name':   consignee,
-                # pipeline + unload terminal are NOT autofilled on the EV01→VCN move;
-                # the operator selects them per parcel in VCN01.
                 'pipeline_name':   None,
                 'unload_terminal': None,
             })
     return rows
+
+
+def cargo_quotas(ev):
+    """Per-cargo total quantity from the EV01 record: {cargo_name: total_qty}.
+    Captured on move so VCN01 can show available-per-cargo and validate parcels."""
+    def _split(key):
+        return [s.strip() for s in (ev.get(key) or '').split(',')
+                if s.strip() and not re.fullmatch(r'-+', s.strip())]
+    cargos, qtys = _split('cargo_name'), _split('quantity')
+    out = {}
+    for i, name in enumerate(cargos):
+        if i >= len(qtys):
+            break
+        try:
+            out[name] = out.get(name, 0.0) + float(qtys[i])
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def close_to_other_terminal(ev_id, terminal_name):
