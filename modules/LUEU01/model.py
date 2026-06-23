@@ -13,6 +13,19 @@ def _num(v):
     return v
 
 
+def _hours(f, t):
+    """Duration in hours between two 'HH:MM' strings (wraps past midnight)."""
+    try:
+        fh, fm = (int(x) for x in str(f).split(':')[:2])
+        th, tm = (int(x) for x in str(t).split(':')[:2])
+    except (ValueError, AttributeError):
+        return 0.0
+    mins = (th * 60 + tm) - (fh * 60 + fm)
+    if mins < 0:
+        mins += 1440
+    return mins / 60.0
+
+
 def get_vessels_with_started_parcels():
     """Vessels that have any LDUD parcel-ops rows. Parcel start/end is entered
     here in LUEU01, so vessels appear as soon as parcels exist (not gated on
@@ -59,28 +72,34 @@ def get_started_parcels(vcn_id):
         cur.execute(f'SELECT id, parcel_no FROM {tbl} WHERE id = ANY(%s)', [all_ids])
         labels = {r['id']: (r['parcel_no'] or f"#{r['id']}") for r in cur.fetchall()}
 
-    # logged qty per parcel (non-deleted)
+    # logged qty + operating hours per parcel (non-deleted), for total & avg flow rate
     pop_ids = [p['parcel_op_id'] for p in parcels]
-    logged = {}
+    agg = {}  # parcel_op_id -> [logged_qty, hours]
     if pop_ids:
-        cur.execute('''SELECT parcel_op_id, COALESCE(SUM(quantity),0) AS s
+        cur.execute('''SELECT parcel_op_id, from_time, to_time, COALESCE(quantity,0) AS q
                        FROM lueu_parcel_log
-                       WHERE parcel_op_id = ANY(%s) AND is_deleted IS NOT TRUE
-                       GROUP BY parcel_op_id''', [pop_ids])
-        logged = {r['parcel_op_id']: float(r['s'] or 0) for r in cur.fetchall()}
+                       WHERE parcel_op_id = ANY(%s) AND is_deleted IS NOT TRUE''', [pop_ids])
+        for r in cur.fetchall():
+            a = agg.setdefault(r['parcel_op_id'], [0.0, 0.0])
+            a[0] += float(r['q'] or 0)
+            a[1] += _hours(r['from_time'], r['to_time'])
     conn.close()
 
     out = []
     for p in parcels:
         ids = _parse_ids(p['parcel_ids'])
         target = float(p['target_qty'] or 0)
+        logged, hours = agg.get(p['parcel_op_id'], [0.0, 0.0])
         out.append({
             'parcel_op_id': p['parcel_op_id'],
             'parcel_no': ', '.join(labels.get(i, f"#{i}") for i in ids) or '—',
             'cargo_name': p['cargo_name'] or '',
             'terminal_name': p['terminal_name'] or '',
             'target_qty': round(target, 3),
-            'logged_qty': round(logged.get(p['parcel_op_id'], 0.0), 3),
+            'logged_qty': round(logged, 3),
+            'remaining_qty': round(target - logged, 3),
+            'op_hours': round(hours, 2),
+            'avg_rate': round(logged / hours, 2) if hours > 0 else 0,
             'uom': 'MT',
             'start_dt': p['start_dt'],
             'end_dt': p['end_dt'],
@@ -100,8 +119,8 @@ def set_parcel_times(parcel_op_id, start_dt, end_dt):
 
 
 _LOG_COLS = ['parcel_op_id', 'entry_date', 'from_time', 'to_time', 'quantity',
-             'quantity_uom', 'medium', 'equipment_name', 'delay_name', 'shift',
-             'operator_name', 'shift_incharge', 'berth_name', 'remarks']
+             'pressure', 'quantity_uom', 'medium', 'equipment_name', 'delay_name',
+             'shift', 'operator_name', 'shift_incharge', 'berth_name', 'remarks']
 
 
 def get_log(parcel_op_id):
@@ -120,6 +139,7 @@ def save_log(data):
     if data.get('medium') == 'Direct Pipe':
         data['equipment_name'] = None
     data['quantity'] = _num(data.get('quantity'))
+    data['pressure'] = _num(data.get('pressure'))
     conn = get_db()
     cur = get_cursor(conn)
     if data.get('id'):

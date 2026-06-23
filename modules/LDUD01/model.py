@@ -121,23 +121,16 @@ def get_data(page=1, size=20, filters=None):
                     qty = 0.0
                 consigner_cargo.append({'vcn_id': c['vcn_id'], 'cargo_name': c['cargo_name'],
                                         'bl_quantity': qty, 'quantity_uom': 'MT'})
+            # One entry per parcel/cargo line — do NOT sum same-named cargo
+            # (e.g. two EDIBLE OIL parcels stay as two separate lines).
             for row_list in [import_cargo, export_cargo, consigner_cargo]:
                 for c in row_list:
                     vid = c['vcn_id']
                     if vid not in vcn_cargo:
                         vcn_cargo[vid] = {'names': [], 'quantities': [], 'uoms': []}
-                    name = c['cargo_name']
-                    qty = float(c['bl_quantity'] or 0)
-                    uom = c['quantity_uom'] or ''
-                    if name not in vcn_cargo[vid]['names']:
-                        vcn_cargo[vid]['names'].append(name)
-                        vcn_cargo[vid]['quantities'].append(qty)
-                        vcn_cargo[vid]['uoms'].append(uom)
-                    else:
-                        idx = vcn_cargo[vid]['names'].index(name)
-                        vcn_cargo[vid]['quantities'][idx] += qty
-                        if not vcn_cargo[vid]['uoms'][idx] and uom:
-                            vcn_cargo[vid]['uoms'][idx] = uom
+                    vcn_cargo[vid]['names'].append(c['cargo_name'])
+                    vcn_cargo[vid]['quantities'].append(float(c['bl_quantity'] or 0))
+                    vcn_cargo[vid]['uoms'].append(c['quantity_uom'] or '')
 
             # Agent, Stevedore and meta from VCN header
             cur.execute('''SELECT id, vessel_agent_name, importer_exporter_name

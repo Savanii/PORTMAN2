@@ -44,31 +44,104 @@
   let vessels = [];
   const subTables = {};      // parcel_op_id -> Tabulator
   const parcelTargets = {};  // parcel_op_id -> target qty (for Remaining)
+  const parcelStart = {};    // parcel_op_id -> start_dt 'YYYY-MM-DDTHH:MM'
+  const parcelEnd = {};      // parcel_op_id -> end_dt
+  let _suppress = false;     // guard against re-entrant cellEdited during clamping
 
   function list(vals) { return {values: vals, autocomplete:true, allowEmpty:true, listOnEmpty:true}; }
+  function r3(n) { return Math.round(n * 1000) / 1000; }
+
+  // hours between two 'HH:MM' strings (wraps past midnight)
+  function rowHours(f, t) {
+    if (!f || !t) return 0;
+    const a = String(f).split(':'), b = String(t).split(':');
+    if (a.length < 2 || b.length < 2) return 0;
+    let mins = (+b[0] * 60 + +b[1]) - (+a[0] * 60 + +a[1]);
+    if (mins < 0) mins += 1440;
+    return mins / 60;
+  }
+  function toDT(d, hhmm) {
+    if (!d || !hhmm) return null;
+    const dt = new Date(`${d}T${String(hhmm).length === 5 ? hhmm : String(hhmm).padStart(5, '0')}`);
+    return isNaN(dt) ? null : dt;
+  }
 
   // Parcel start/end are entered here in LUEU01 (persisted on the LDUD parcel-op).
   async function saveParcelTimes(pid) {
-    const s = document.getElementById(`start-${pid}`).value;
-    const e = document.getElementById(`end-${pid}`).value;
+    const startEl = document.getElementById(`start-${pid}`), endEl = document.getElementById(`end-${pid}`);
+    const s = startEl.value, e = endEl.value;
+    if (s && e && e < s) { alert('End cannot be before Start.'); endEl.value = parcelEnd[pid] || ''; return; }
     await fetch('/api/module/LUEU01/parcel/times', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({parcel_op_id: pid, start_dt: s, end_dt: e})
     });
+    parcelStart[pid] = s; parcelEnd[pid] = e;
+    if (endEl) endEl.min = s || '';   // can't pick an end before start
     const span = document.getElementById(`status-${pid}`);
     if (span) { span.textContent = '● ' + (e ? 'Completed' : 'In Progress'); span.style.color = e ? '#15803d' : '#c2410c'; }
+    recomputeTotals(pid);
   }
 
-  // Total = running cumulative of Last Hour; Remaining = target - Total. Computed, not stored.
+  // Total = running cumulative of Last Hour; Remaining = target - Total (computed, not stored).
+  // Also refreshes the per-parcel metrics (avg flow rate, op hours, ETA).
   function recomputeTotals(pid) {
     const t = subTables[pid];
     if (!t) return;
     const target = parcelTargets[pid] || 0;
-    let cum = 0;
+    let cum = 0, hours = 0;
     t.getRows().forEach(row => {
-      cum += parseFloat(row.getData().quantity || 0) || 0;
-      row.update({_total: Math.round(cum * 1000) / 1000, _remaining: Math.round((target - cum) * 1000) / 1000});
+      const d = row.getData();
+      cum += parseFloat(d.quantity || 0) || 0;
+      hours += rowHours(d.from_time, d.to_time);
+      row.update({_total: r3(cum), _remaining: r3(target - cum)});
     });
+    const m = document.getElementById(`metrics-${pid}`);
+    if (m) {
+      const rate = hours > 0 ? cum / hours : 0;
+      const remaining = target - cum;
+      const eta = (rate > 0 && remaining > 0) ? remaining / rate : 0;
+      m.innerHTML = `Avg <b>${rate.toFixed(1)}</b> MT/Hr · ${hours.toFixed(1)} h`
+        + (eta > 0 ? ` · ETA ~<b>${eta.toFixed(1)}</b> h` : '')
+        + (remaining < 0 ? ` · <span style="color:#dc2626">over by ${Math.abs(r3(remaining))}</span>` : '');
+    }
+  }
+
+  // ── logbook cell validators ──────────────────────────────────────────────
+  function clampQty(cell) {
+    if (_suppress) return;
+    const row = cell.getRow(), pid = row.getData().parcel_op_id;
+    const target = parcelTargets[pid] || 0;
+    if (target > 0) {
+      let cumBefore = 0;
+      for (const r of subTables[pid].getRows()) { if (r === row) break; cumBefore += parseFloat(r.getData().quantity || 0) || 0; }
+      const avail = r3(target - cumBefore);
+      const v = parseFloat(cell.getValue() || 0) || 0;
+      if (v > avail) {
+        alert(`Last Hour (${v}) exceeds available ${avail} MT — clamped to ${Math.max(0, avail)}.`);
+        _suppress = true; cell.setValue(Math.max(0, avail)); _suppress = false;
+      }
+    }
+    recomputeTotals(pid);
+  }
+  function validateTimeCell(cell) {
+    if (_suppress) return;
+    const d = cell.getRow().getData(), pid = d.parcel_op_id, val = cell.getValue();
+    const revert = () => { _suppress = true; cell.setValue(cell.getOldValue() || ''); _suppress = false; };
+    if (val && !/^\d{1,2}:\d{2}$/.test(val)) { alert('Time must be HH:MM.'); return revert(); }
+    const start = parcelStart[pid];
+    if (val && start) {
+      const dt = toDT(d.entry_date, val);
+      if (dt && new Date(start) > dt) { alert(`Time cannot be before parcel Start (${start.replace('T', ' ')}).`); return revert(); }
+    }
+    if (d.from_time && d.to_time && rowHours(d.from_time, d.to_time) <= 0) {
+      alert('"To" must be after "From".'); return revert();
+    }
+    recomputeTotals(pid);
+  }
+  function mediumEdited(cell) {
+    const row = cell.getRow();
+    if (cell.getValue() === 'Direct Pipe') row.update({equipment_name: ''});
+    row.reformat();
   }
 
   function saveSel() {
@@ -125,23 +198,29 @@
     if (!selected.vcn_id) { listEl.innerHTML = ''; return; }
     const parcels = await fetch(`/api/module/LUEU01/parcels/${selected.vcn_id}`).then(r => r.json());
     const berth = (v && v.berth_name) || '';
-    parcels.forEach(p => { parcelTargets[p.parcel_op_id] = p.target_qty || 0; });
+    parcels.forEach(p => {
+      parcelTargets[p.parcel_op_id] = p.target_qty || 0;
+      parcelStart[p.parcel_op_id] = p.start_dt || '';
+      parcelEnd[p.parcel_op_id] = p.end_dt || '';
+    });
     const dis = canEdit ? '' : 'disabled';
     listEl.innerHTML = parcels.map(p => {
       const pct = p.target_qty > 0 ? Math.min(100, Math.round(p.logged_qty / p.target_qty * 100)) : 0;
       const open = selected.expanded.includes(p.parcel_op_id);
       const statusColor = p.status === 'Completed' ? '#15803d' : '#c2410c';
       const term = p.terminal_name ? ` · ${p.terminal_name}` : '';
+      const eta = (p.avg_rate > 0 && p.remaining_qty > 0) ? ` · ETA ~${(p.remaining_qty / p.avg_rate).toFixed(1)} h` : '';
       return `<div class="parcel-card">
         <div class="parcel-head" onclick="toggleParcel(${p.parcel_op_id})">
           <div><b>${p.parcel_no}</b> — ${p.cargo_name}${term}
-            <span id="status-${p.parcel_op_id}" style="font-size:11px;color:${statusColor};">● ${p.status}</span></div>
+            <span id="status-${p.parcel_op_id}" style="font-size:11px;color:${statusColor};">● ${p.status}</span>
+            <span id="metrics-${p.parcel_op_id}" style="font-size:11px;color:#475569;margin-left:8px;">Avg <b>${p.avg_rate}</b> MT/Hr · ${p.op_hours} h${eta}</span></div>
           <div class="progress-pill">${p.logged_qty} / ${p.target_qty} ${p.uom} (${pct}%)</div>
         </div>
         <div id="log-wrap-${p.parcel_op_id}" style="display:${open ? 'block' : 'none'};padding:0 8px 8px;">
           <div style="display:flex;gap:16px;align-items:center;padding:6px 2px;font-size:12px;">
             <label>Start: <input type="datetime-local" id="start-${p.parcel_op_id}" value="${p.start_dt || ''}" ${dis} onchange="saveParcelTimes(${p.parcel_op_id})"></label>
-            <label>End: <input type="datetime-local" id="end-${p.parcel_op_id}" value="${p.end_dt || ''}" ${dis} onchange="saveParcelTimes(${p.parcel_op_id})"></label>
+            <label>End: <input type="datetime-local" id="end-${p.parcel_op_id}" value="${p.end_dt || ''}" min="${p.start_dt || ''}" ${dis} onchange="saveParcelTimes(${p.parcel_op_id})"></label>
           </div>
           ${canEdit ? `<div style="margin:4px 0;">
             <button class="lueu-btn" onclick="addLogRow(${p.parcel_op_id}, '${berth.replace(/'/g, "\\'")}')">+ Add</button>
@@ -161,45 +240,42 @@
     saveSel();
   }
 
+  const _remFmt = function(c) {
+    const v = c.getValue();
+    if (v == null) return '';
+    return `<span style="color:${v < 0 ? '#dc2626' : '#1f2937'}">${v}</span>`;
+  };
+
   function logColumns() {
     return [
-      {title: "Date", field: "entry_date", editor: canEdit ? "input" : false, width: 110},
-      {title: "From", field: "from_time", editor: canEdit ? "input" : false, width: 80},
-      {title: "To", field: "to_time", editor: canEdit ? "input" : false, width: 80},
-      {title: "Last Hour", field: "quantity", editor: canEdit ? "number" : false, hozAlign: "right", width: 90,
-        editorParams: {min: 0, step: 0.01},
-        cellEdited: function(cell) { recomputeTotals(cell.getRow().getData().parcel_op_id); }},
-      {title: "Total", field: "_total", hozAlign: "right", width: 90,
+      {title: "Date", field: "entry_date", editor: canEdit ? "input" : false, width: 96},
+      {title: "From", field: "from_time", editor: canEdit ? "input" : false, width: 60, cellEdited: validateTimeCell},
+      {title: "To", field: "to_time", editor: canEdit ? "input" : false, width: 60, cellEdited: validateTimeCell},
+      {title: "Last Hr", field: "quantity", editor: canEdit ? "number" : false, hozAlign: "right", width: 70,
+        editorParams: {min: 0, step: 0.01}, cellEdited: clampQty},
+      {title: "Total", field: "_total", hozAlign: "right", width: 70,
         formatter: c => c.getValue() == null ? '' : c.getValue()},
-      {title: "Remaining", field: "_remaining", hozAlign: "right", width: 90,
-        formatter: function(c) {
-          const v = c.getValue();
-          if (v == null) return '';
-          return `<span style="color:${v < 0 ? '#dc2626' : '#1f2937'}">${v}</span>`;
-        }},
-      {title: "UOM", field: "quantity_uom", editor: canEdit ? "list" : false, editorParams: list(masters.uom.names), width: 80},
-      {title: "Medium", field: "medium", width: 120,
-        editor: canEdit ? "list" : false, editorParams: {values: ['Equipment', 'Direct Pipe']},
-        cellEdited: function(cell) {
-          const row = cell.getRow();
-          if (cell.getValue() === 'Direct Pipe') row.update({equipment_name: ''});
-          row.reformat();
-        }},
-      {title: "Equipment", field: "equipment_name", width: 140,
+      {title: "Rem", field: "_remaining", hozAlign: "right", width: 72, formatter: _remFmt},
+      {title: "Press", field: "pressure", editor: canEdit ? "number" : false, hozAlign: "right", width: 58,
+        editorParams: {step: 0.01}},
+      {title: "UOM", field: "quantity_uom", editor: canEdit ? "list" : false, editorParams: list(masters.uom.names), width: 56},
+      {title: "Medium", field: "medium", width: 90,
+        editor: canEdit ? "list" : false, editorParams: {values: ['Equipment', 'Direct Pipe']}, cellEdited: mediumEdited},
+      {title: "Equipment", field: "equipment_name", width: 100,
         editor: canEdit ? "list" : false, editorParams: list(masters.equipment),
         editable: function(cell) { return canEdit && cell.getRow().getData().medium === 'Equipment'; },
         formatter: function(cell) {
           return cell.getRow().getData().medium === 'Equipment'
             ? (cell.getValue() || '') : '<span style="color:#cbd5e1">—</span>';
         }},
-      {title: "Delay", field: "delay_name", editor: canEdit ? "list" : false, editorParams: list(masters.delays), width: 140},
-      {title: "Shift", field: "shift", editor: canEdit ? "list" : false, editorParams: {values: ['A', 'B', 'C']}, width: 70},
-      {title: "Operator", field: "operator_name", editor: canEdit ? "list" : false, editorParams: list(masters.operators), width: 120},
-      {title: "Incharge", field: "shift_incharge", editor: canEdit ? "list" : false, editorParams: list(masters.incharge), width: 120},
-      {title: "Berth", field: "berth_name", editor: canEdit ? "list" : false, editorParams: list(masters.berths), width: 120},
-      {title: "Remarks", field: "remarks", editor: canEdit ? "input" : false, width: 150},
-      canDelete ? {title: "", width: 40, headerSort: false, hozAlign: "center",
-        formatter: () => '<button class="lueu-btn secondary" style="padding:1px 6px;">X</button>',
+      {title: "Delay", field: "delay_name", editor: canEdit ? "list" : false, editorParams: list(masters.delays), width: 100},
+      {title: "Shift", field: "shift", editor: canEdit ? "list" : false, editorParams: {values: ['A', 'B', 'C']}, width: 50},
+      {title: "Operator", field: "operator_name", editor: canEdit ? "list" : false, editorParams: list(masters.operators), width: 88},
+      {title: "Incharge", field: "shift_incharge", editor: canEdit ? "list" : false, editorParams: list(masters.incharge), width: 88},
+      {title: "Berth", field: "berth_name", editor: canEdit ? "list" : false, editorParams: list(masters.berths), width: 88},
+      {title: "Remarks", field: "remarks", editor: canEdit ? "input" : false, width: 100},
+      canDelete ? {title: "", width: 32, headerSort: false, hozAlign: "center",
+        formatter: () => '<button class="lueu-btn secondary" style="padding:1px 5px;">X</button>',
         cellClick: (e, cell) => deleteLogRow(cell.getRow())} : null
     ].filter(Boolean);
   }
@@ -207,7 +283,7 @@
   function initLogTable(pid) {
     if (subTables[pid]) return;
     subTables[pid] = new Tabulator(`#log-table-${pid}`, {
-      layout: "fitDataFill", height: 220,
+      layout: "fitData", height: 220,
       ajaxURL: `/api/module/LUEU01/log/${pid}`,
       columnDefaults: {headerSort: false},
       columns: logColumns(),
@@ -221,11 +297,20 @@
     const t = subTables[pid];
     if (!t) return;
     const rows = t.getRows();
-    const prevTo = rows.length ? rows[rows.length - 1].getData().to_time : '';
+    // First row seeds date + From from the parcel Start; later rows chain From = previous To.
+    const start = parcelStart[pid] || '';
+    let date, from;
+    if (rows.length) {
+      const prev = rows[rows.length - 1].getData();
+      date = prev.entry_date || (start ? start.slice(0, 10) : new Date().toISOString().slice(0, 10));
+      from = prev.to_time || '';
+    } else {
+      date = start ? start.slice(0, 10) : new Date().toISOString().slice(0, 10);
+      from = start ? start.slice(11, 16) : '';
+    }
     t.addRow({
-      parcel_op_id: pid, entry_date: new Date().toISOString().slice(0, 10),
-      from_time: prevTo || '', shift: currentShift(), medium: 'Direct Pipe',
-      quantity_uom: masters.uom.default, berth_name: defaultBerth
+      parcel_op_id: pid, entry_date: date, from_time: from, shift: currentShift(),
+      medium: 'Direct Pipe', quantity_uom: masters.uom.default, berth_name: defaultBerth
     }, false).then(() => recomputeTotals(pid));
   }
 
