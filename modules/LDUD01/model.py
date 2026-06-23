@@ -252,8 +252,10 @@ def get_parcel_ops(ldud_id):
 
 
 def save_parcel_op(data):
-    # One row = one parcel + terminal + quantity (start/end). The same parcel may
-    # appear on multiple rows (e.g. one per terminal), so no merge/uniqueness guard.
+    # One row = one parcel + terminal + quantity. The same parcel may appear on
+    # multiple rows (e.g. one per terminal), so no merge/uniqueness guard.
+    # start_dt/end_dt are NOT written here — they are owned by LUEU01 (operators
+    # enter parcel start/end in the logbook). An LDUD edit must not wipe them.
     _clean_empty(data)
     ids = _parse_ids(data.get('parcel_ids'))
     parcel_ids = ','.join(map(str, ids)) if ids else None
@@ -262,9 +264,8 @@ def save_parcel_op(data):
         quantity = None
     conn = get_db()
     cur = get_cursor(conn)
-    cols = ['parcel_ids', 'cargo_name', 'terminal_name', 'quantity', 'start_dt', 'end_dt']
-    vals = [parcel_ids, data.get('cargo_name'), data.get('terminal_name'), quantity,
-            data.get('start_dt'), data.get('end_dt')]
+    cols = ['parcel_ids', 'cargo_name', 'terminal_name', 'quantity']
+    vals = [parcel_ids, data.get('cargo_name'), data.get('terminal_name'), quantity]
     if data.get('id'):
         cur.execute(f"UPDATE ldud_parcel_ops SET {', '.join(f'{c}=%s' for c in cols)} WHERE id=%s",
                     vals + [data['id']])

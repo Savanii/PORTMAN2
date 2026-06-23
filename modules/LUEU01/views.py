@@ -44,6 +44,20 @@ def get_parcels(vcn_id):
     return jsonify(model.get_started_parcels(vcn_id))
 
 
+@bp.route('/api/module/LUEU01/parcel/times', methods=['POST'])
+@login_required
+def set_parcel_times():
+    perms = get_perms()
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission'}), 403
+    data = request.json or {}
+    pid = data.get('parcel_op_id')
+    if not pid:
+        return jsonify({'error': 'Missing parcel_op_id'}), 400
+    model.set_parcel_times(pid, data.get('start_dt'), data.get('end_dt'))
+    return jsonify({'success': True})
+
+
 @bp.route('/api/module/LUEU01/log/<int:parcel_op_id>')
 @login_required
 def get_log(parcel_op_id):

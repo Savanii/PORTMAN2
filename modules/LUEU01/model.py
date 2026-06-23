@@ -14,6 +14,9 @@ def _num(v):
 
 
 def get_vessels_with_started_parcels():
+    """Vessels that have any LDUD parcel-ops rows. Parcel start/end is entered
+    here in LUEU01, so vessels appear as soon as parcels exist (not gated on
+    start_dt)."""
     conn = get_db()
     cur = get_cursor(conn)
     cur.execute('''
@@ -22,7 +25,6 @@ def get_vessels_with_started_parcels():
         FROM ldud_parcel_ops po
         JOIN ldud_header l ON l.id = po.ldud_id
         JOIN vcn_header h ON h.id = l.vcn_id
-        WHERE po.start_dt IS NOT NULL
         GROUP BY h.id, h.vcn_doc_num, h.vessel_name, h.berth_name
         ORDER BY h.vcn_doc_num DESC
     ''')
@@ -32,37 +34,30 @@ def get_vessels_with_started_parcels():
 
 
 def get_started_parcels(vcn_id):
+    """Each parcel-ops row (parcel + terminal) for the vessel. The per-row target
+    is ldud_parcel_ops.quantity; remaining = target - logged. start/end are
+    entered in LUEU01."""
     conn = get_db()
     cur = get_cursor(conn)
-    # operation_type decides which table holds the parcel master rows
-    cur.execute('SELECT operation_type FROM vcn_header WHERE id=%s', [vcn_id])
-    row = cur.fetchone()
-    op = (row or {}).get('operation_type') if row else None
-    is_export = op == 'Export'
-    tbl = 'vcn_export_cargo_declaration' if is_export else 'vcn_consigners'
-    qty_col = 'bl_quantity' if is_export else 'quantity'
-
     cur.execute('''
-        SELECT po.id AS parcel_op_id, po.parcel_ids, po.cargo_name,
-               po.start_dt, po.end_dt
+        SELECT po.id AS parcel_op_id, po.parcel_ids, po.cargo_name, po.terminal_name,
+               po.quantity AS target_qty, po.start_dt, po.end_dt
         FROM ldud_parcel_ops po
         JOIN ldud_header l ON l.id = po.ldud_id
-        WHERE l.vcn_id = %s AND po.start_dt IS NOT NULL
+        WHERE l.vcn_id = %s
         ORDER BY po.id
     ''', [vcn_id])
     parcels = [dict(r) for r in cur.fetchall()]
 
-    # resolve parcel_no + declared qty from the source table
+    # resolve parcel_no label from the operation-type source table
+    cur.execute('SELECT operation_type FROM vcn_header WHERE id=%s', [vcn_id])
+    row = cur.fetchone()
+    tbl = 'vcn_export_cargo_declaration' if (row or {}).get('operation_type') == 'Export' else 'vcn_consigners'
     all_ids = sorted({pid for p in parcels for pid in _parse_ids(p['parcel_ids'])})
-    labels, qty = {}, {}
+    labels = {}
     if all_ids:
-        cur.execute(f'SELECT id, parcel_no, {qty_col} AS q FROM {tbl} WHERE id = ANY(%s)', [all_ids])
-        for r in cur.fetchall():
-            labels[r['id']] = r['parcel_no'] or f"#{r['id']}"
-            try:
-                qty[r['id']] = float(str(r['q']).replace(',', '')) if r['q'] is not None else 0.0
-            except (ValueError, TypeError):
-                qty[r['id']] = 0.0
+        cur.execute(f'SELECT id, parcel_no FROM {tbl} WHERE id = ANY(%s)', [all_ids])
+        labels = {r['id']: (r['parcel_no'] or f"#{r['id']}") for r in cur.fetchall()}
 
     # logged qty per parcel (non-deleted)
     pop_ids = [p['parcel_op_id'] for p in parcels]
@@ -78,11 +73,13 @@ def get_started_parcels(vcn_id):
     out = []
     for p in parcels:
         ids = _parse_ids(p['parcel_ids'])
+        target = float(p['target_qty'] or 0)
         out.append({
             'parcel_op_id': p['parcel_op_id'],
             'parcel_no': ', '.join(labels.get(i, f"#{i}") for i in ids) or '—',
             'cargo_name': p['cargo_name'] or '',
-            'declared_qty': round(sum(qty.get(i, 0.0) for i in ids), 3),
+            'terminal_name': p['terminal_name'] or '',
+            'target_qty': round(target, 3),
             'logged_qty': round(logged.get(p['parcel_op_id'], 0.0), 3),
             'uom': 'MT',
             'start_dt': p['start_dt'],
@@ -90,6 +87,16 @@ def get_started_parcels(vcn_id):
             'status': 'Completed' if p['end_dt'] else 'In Progress',
         })
     return out
+
+
+def set_parcel_times(parcel_op_id, start_dt, end_dt):
+    """Operators enter the parcel start/end here; persisted on ldud_parcel_ops."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('UPDATE ldud_parcel_ops SET start_dt=%s, end_dt=%s WHERE id=%s',
+                [start_dt or None, end_dt or None, parcel_op_id])
+    conn.commit()
+    conn.close()
 
 
 _LOG_COLS = ['parcel_op_id', 'entry_date', 'from_time', 'to_time', 'quantity',

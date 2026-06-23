@@ -746,7 +746,6 @@
                 }
             },
             {title: "Created By", field: "created_by", width: 90},
-            {title: "Material PO", field: "material_po_number", editor: canEdit ? "input" : false, width: 120},
             {
                 title: "Closure", field: "_closure_actions", width: 110, headerSort: false,
                 formatter: function(cell) {
@@ -1300,10 +1299,6 @@
                     }},
                 {title: "Quantity", field: "quantity", widthGrow: 1, hozAlign: "right",
                     editor: canEdit ? "number" : false, editorParams: {min: 0, step: 0.01}},
-                {title: "Start", field: "start_dt", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
-                {title: "End", field: "end_dt", widthGrow: 1, editor: canEdit ? datetimeEditor : false,
-                    formatter: datetimeCellFormatter},
                 canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 50, widthGrow: 0, hozAlign: "center", headerSort: false,
                     cellClick: function(e, cell) { deleteSubRow('parcel_ops', cell.getRow().getData().id, ldudId); }
                 } : null
@@ -1410,7 +1405,7 @@
     function deleteSelected() {
         const selected = table.getSelectedRows();
         if (selected.length === 0) { alert('Select rows to delete'); return; }
-        if (!confirm(`Delete ${selected.length} row(s)?`)) return;
+        if (!confirm(`Delete ${selected.length} record(s)?\n\nThis also deletes their parcels and ALL related LUEU01 logbook entries (quantity logs, start/end times). This cannot be undone.`)) return;
         selected.forEach(row => {
             const id = row.getData().id;
             if (id) {

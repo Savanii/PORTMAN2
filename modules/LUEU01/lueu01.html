@@ -42,9 +42,34 @@
   let masters = {equipment:[], delays:[], uom:{names:[],default:''}, berths:[], incharge:[], operators:[]};
   let selected = {vcn_id:null, expanded:[]};
   let vessels = [];
-  const subTables = {};   // parcel_op_id -> Tabulator
+  const subTables = {};      // parcel_op_id -> Tabulator
+  const parcelTargets = {};  // parcel_op_id -> target qty (for Remaining)
 
   function list(vals) { return {values: vals, autocomplete:true, allowEmpty:true, listOnEmpty:true}; }
+
+  // Parcel start/end are entered here in LUEU01 (persisted on the LDUD parcel-op).
+  async function saveParcelTimes(pid) {
+    const s = document.getElementById(`start-${pid}`).value;
+    const e = document.getElementById(`end-${pid}`).value;
+    await fetch('/api/module/LUEU01/parcel/times', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({parcel_op_id: pid, start_dt: s, end_dt: e})
+    });
+    const span = document.getElementById(`status-${pid}`);
+    if (span) { span.textContent = '● ' + (e ? 'Completed' : 'In Progress'); span.style.color = e ? '#15803d' : '#c2410c'; }
+  }
+
+  // Total = running cumulative of Last Hour; Remaining = target - Total. Computed, not stored.
+  function recomputeTotals(pid) {
+    const t = subTables[pid];
+    if (!t) return;
+    const target = parcelTargets[pid] || 0;
+    let cum = 0;
+    t.getRows().forEach(row => {
+      cum += parseFloat(row.getData().quantity || 0) || 0;
+      row.update({_total: Math.round(cum * 1000) / 1000, _remaining: Math.round((target - cum) * 1000) / 1000});
+    });
+  }
 
   function saveSel() {
     localStorage.setItem('lueu_sel', JSON.stringify(selected));
@@ -92,30 +117,39 @@
   }
 
   async function renderParcels() {
+    // rebuilding innerHTML below detaches existing grids — destroy them first
+    for (const k of Object.keys(subTables)) { try { subTables[k].destroy(); } catch (e) {} delete subTables[k]; }
     const v = currentVessel();
     document.getElementById('vesselTitle').textContent = v ? `${v.vessel_name} — ${v.vcn_doc_num}` : 'Select a vessel';
     const listEl = document.getElementById('parcelList');
     if (!selected.vcn_id) { listEl.innerHTML = ''; return; }
     const parcels = await fetch(`/api/module/LUEU01/parcels/${selected.vcn_id}`).then(r => r.json());
     const berth = (v && v.berth_name) || '';
+    parcels.forEach(p => { parcelTargets[p.parcel_op_id] = p.target_qty || 0; });
+    const dis = canEdit ? '' : 'disabled';
     listEl.innerHTML = parcels.map(p => {
-      const pct = p.declared_qty > 0 ? Math.min(100, Math.round(p.logged_qty / p.declared_qty * 100)) : 0;
+      const pct = p.target_qty > 0 ? Math.min(100, Math.round(p.logged_qty / p.target_qty * 100)) : 0;
       const open = selected.expanded.includes(p.parcel_op_id);
       const statusColor = p.status === 'Completed' ? '#15803d' : '#c2410c';
+      const term = p.terminal_name ? ` · ${p.terminal_name}` : '';
       return `<div class="parcel-card">
         <div class="parcel-head" onclick="toggleParcel(${p.parcel_op_id})">
-          <div><b>${p.parcel_no}</b> — ${p.cargo_name}
-            <span style="font-size:11px;color:${statusColor};">● ${p.status}</span></div>
-          <div class="progress-pill">${p.logged_qty} / ${p.declared_qty} ${p.uom} (${pct}%)</div>
+          <div><b>${p.parcel_no}</b> — ${p.cargo_name}${term}
+            <span id="status-${p.parcel_op_id}" style="font-size:11px;color:${statusColor};">● ${p.status}</span></div>
+          <div class="progress-pill">${p.logged_qty} / ${p.target_qty} ${p.uom} (${pct}%)</div>
         </div>
         <div id="log-wrap-${p.parcel_op_id}" style="display:${open ? 'block' : 'none'};padding:0 8px 8px;">
+          <div style="display:flex;gap:16px;align-items:center;padding:6px 2px;font-size:12px;">
+            <label>Start: <input type="datetime-local" id="start-${p.parcel_op_id}" value="${p.start_dt || ''}" ${dis} onchange="saveParcelTimes(${p.parcel_op_id})"></label>
+            <label>End: <input type="datetime-local" id="end-${p.parcel_op_id}" value="${p.end_dt || ''}" ${dis} onchange="saveParcelTimes(${p.parcel_op_id})"></label>
+          </div>
           ${canEdit ? `<div style="margin:4px 0;">
             <button class="lueu-btn" onclick="addLogRow(${p.parcel_op_id}, '${berth.replace(/'/g, "\\'")}')">+ Add</button>
             <button class="lueu-btn secondary" onclick="saveLog(${p.parcel_op_id})">Save</button>
           </div>` : ''}
           <div id="log-table-${p.parcel_op_id}"></div>
         </div></div>`;
-    }).join('') || '<div style="color:#94a3b8;padding:8px;">No started parcels.</div>';
+    }).join('') || '<div style="color:#94a3b8;padding:8px;">No parcels for this vessel.</div>';
     for (const pid of selected.expanded) initLogTable(pid);
   }
 
@@ -132,8 +166,17 @@
       {title: "Date", field: "entry_date", editor: canEdit ? "input" : false, width: 110},
       {title: "From", field: "from_time", editor: canEdit ? "input" : false, width: 80},
       {title: "To", field: "to_time", editor: canEdit ? "input" : false, width: 80},
-      {title: "Qty", field: "quantity", editor: canEdit ? "number" : false, hozAlign: "right", width: 90,
-        editorParams: {min: 0, step: 0.01}},
+      {title: "Last Hour", field: "quantity", editor: canEdit ? "number" : false, hozAlign: "right", width: 90,
+        editorParams: {min: 0, step: 0.01},
+        cellEdited: function(cell) { recomputeTotals(cell.getRow().getData().parcel_op_id); }},
+      {title: "Total", field: "_total", hozAlign: "right", width: 90,
+        formatter: c => c.getValue() == null ? '' : c.getValue()},
+      {title: "Remaining", field: "_remaining", hozAlign: "right", width: 90,
+        formatter: function(c) {
+          const v = c.getValue();
+          if (v == null) return '';
+          return `<span style="color:${v < 0 ? '#dc2626' : '#1f2937'}">${v}</span>`;
+        }},
       {title: "UOM", field: "quantity_uom", editor: canEdit ? "list" : false, editorParams: list(masters.uom.names), width: 80},
       {title: "Medium", field: "medium", width: 120,
         editor: canEdit ? "list" : false, editorParams: {values: ['Equipment', 'Direct Pipe']},
@@ -167,7 +210,8 @@
       layout: "fitDataFill", height: 220,
       ajaxURL: `/api/module/LUEU01/log/${pid}`,
       columnDefaults: {headerSort: false},
-      columns: logColumns()
+      columns: logColumns(),
+      dataLoaded: function() { recomputeTotals(pid); }
     });
   }
 
@@ -182,7 +226,7 @@
       parcel_op_id: pid, entry_date: new Date().toISOString().slice(0, 10),
       from_time: prevTo || '', shift: currentShift(), medium: 'Direct Pipe',
       quantity_uom: masters.uom.default, berth_name: defaultBerth
-    }, false);
+    }, false).then(() => recomputeTotals(pid));
   }
 
   async function saveLog(pid) {
