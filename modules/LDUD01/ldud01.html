@@ -625,6 +625,12 @@
 
     // datetimeEditor and dateEditor are now global (defined in base.html)
 
+    // LDUD01 shows all timestamps as DD-MM-YYYY HH:MM (drop the global " IST" suffix).
+    // Overrides the global formatter for this page only.
+    window.datetimeCellFormatter = function(cell) {
+        return formatDateTime(cell.getValue()).replace(/ IST$/, '');
+    };
+
     function normalizeDate(value) {
         if (!value) return '';
         const str = String(value).trim();
