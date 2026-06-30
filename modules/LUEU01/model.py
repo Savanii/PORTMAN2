@@ -71,15 +71,17 @@ def get_started_parcels(vcn_id):
     is_export = (row or {}).get('operation_type') == 'Export'
     tbl = 'vcn_export_cargo_declaration' if is_export else 'vcn_consigners'
     qty_col = 'bl_quantity' if is_export else 'quantity'
-    # equipment_names only exists on the import consigner table
+    # equipment_names / pipeline_name only exist on the import consigner table
     equip_col = 'NULL' if is_export else 'equipment_names'
+    pipe_col = 'NULL' if is_export else 'pipeline_name'
     all_ids = sorted({pid for p in parcels for pid in _parse_ids(p['parcel_ids'])})
-    labels, src_qty, src_equip = {}, {}, {}
+    labels, src_qty, src_equip, src_pipe = {}, {}, {}, {}
     if all_ids:
-        cur.execute(f'SELECT id, parcel_no, {qty_col} AS q, {equip_col} AS equip FROM {tbl} WHERE id = ANY(%s)', [all_ids])
+        cur.execute(f'SELECT id, parcel_no, {qty_col} AS q, {equip_col} AS equip, {pipe_col} AS pipe FROM {tbl} WHERE id = ANY(%s)', [all_ids])
         for r in cur.fetchall():
             labels[r['id']] = r['parcel_no'] or f"#{r['id']}"
             src_equip[r['id']] = r['equip'] or ''
+            src_pipe[r['id']] = r['pipe'] or ''
             try:
                 src_qty[r['id']] = float(str(r['q']).replace(',', '')) if r['q'] is not None else 0.0
             except (ValueError, TypeError):
@@ -116,12 +118,15 @@ def get_started_parcels(vcn_id):
         ids = _parse_ids(p['parcel_ids'])
         target = targets[p['parcel_op_id']]
         logged, hours = agg.get(p['parcel_op_id'], [0.0, 0.0])
-        # distinct equipment chosen on the VCN parcel(s) — default for log lines
-        equip = []
-        for i in ids:
-            for e in str(src_equip.get(i, '')).split(','):
-                if e.strip() and e.strip() not in equip:
-                    equip.append(e.strip())
+        # distinct equipment / pipelines across the VCN parcel(s)
+        def _distinct(src):
+            vals = []
+            for i in ids:
+                for x in str(src.get(i, '')).split(','):
+                    if x.strip() and x.strip() not in vals:
+                        vals.append(x.strip())
+            return vals
+        equip = _distinct(src_equip)
         out.append({
             'parcel_op_id': p['parcel_op_id'],
             'parcel_no': ', '.join(labels.get(i, f"#{i}") for i in ids) or '—',
@@ -134,6 +139,7 @@ def get_started_parcels(vcn_id):
             'avg_rate': round(logged / hours, 2) if hours > 0 else 0,
             'uom': 'MT',
             'equipment_names': ', '.join(equip),
+            'pipeline_name': ', '.join(_distinct(src_pipe)),
             'expected_start': p['expected_start'],
             'expected_flow_rate': _num(p['expected_flow_rate']),
             'start_dt': p['start_dt'],

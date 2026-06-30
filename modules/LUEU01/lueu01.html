@@ -288,9 +288,10 @@
       const open = selected.expanded.includes(p.parcel_op_id);
       const statusColor = p.status === 'Completed' ? '#15803d' : '#c2410c';
       const term = p.terminal_name ? ` · ${p.terminal_name}` : '';
+      const pipe = p.pipeline_name ? ` · <span style="color:#475569;">${p.pipeline_name}</span>` : '';
       return `<div class="parcel-card">
         <div class="parcel-head" onclick="toggleParcel(${p.parcel_op_id})">
-          <div><b>${p.parcel_no}</b> — ${p.cargo_name}${term}
+          <div><b>${p.parcel_no}</b> — ${p.cargo_name}${term}${pipe}
             <span id="status-${p.parcel_op_id}" style="font-size:11px;font-weight:600;color:${statusColor};margin-left:6px;">● ${p.status}</span>
             <span id="metrics-${p.parcel_op_id}" style="margin-left:10px;">${metricsHTML(p.avg_rate, p.op_hours, p.remaining_qty, p.start_dt, p.target_qty)}</span></div>
           <div class="progress-pill">${p.logged_qty} / ${p.target_qty} ${p.uom} (${pct}%)</div>
