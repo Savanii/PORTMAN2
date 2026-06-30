@@ -530,7 +530,7 @@
         if (!v) return;
         const d = new Date(String(v).replace(' ', 'T'));
         const today = new Date(); today.setHours(23, 59, 59, 999);
-        if (!isNaN(d) && d > today) { alert('BL Date cannot be in the future.'); cell.setValue(cell.getOldValue() || ''); }
+        if (!isNaN(d) && d > today) { alert('BL Date cannot be in the future.'); cell.setValue(''); }
     }
 
     function makeMultiSelectEditor(optionsList) {
