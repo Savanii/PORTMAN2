@@ -462,6 +462,7 @@
     let quantityUoms = [];
     let defaultUom = '';
     let portNames = [];
+    let defaultDischargePort = '';   // VPM01 default discharge port (auto-fills new VCNs)
     let berthNames = [];   // PBM01 Port Berth Master
     let moduleConfig = {};
 
@@ -731,6 +732,8 @@
         const uomDefaultData = await uomDefaultRes.json();
         defaultUom = uomDefaultData.default || '';
         portNames = await portRes.json();
+        const defPort = portNames.find(p => p && typeof p === 'object' && p.is_default_discharge);
+        defaultDischargePort = defPort ? defPort.name : '';
         berthNames = await berthRes.json();
         moduleConfig = await configRes.json();
         initFilterConfig();
@@ -1143,7 +1146,20 @@
                 },
                 {title: "Toll", field: "toll_applicable", width: 70, widthGrow: 0, hozAlign: "center",
                     formatter: "tickCross", formatterParams: {allowEmpty: true},
-                    editor: canEdit ? "tickCross" : false, editorParams: {tristate: false}},
+                    editor: canEdit ? "tickCross" : false, editorParams: {tristate: false},
+                    cellEdited: function(cell) {
+                        const row = cell.getRow();
+                        if (cell.getValue()) { row.update({toll_reason: ''}); return; }  // toll on → no reason needed
+                        // toll set to none (X) — a reason is mandatory
+                        const reason = (prompt('Toll not applicable — enter the reason:', row.getData().toll_reason || '') || '').trim();
+                        if (!reason) { cell.setValue(true); alert('Reason required — Toll kept applicable.'); return; }
+                        row.update({toll_reason: reason});
+                        markDirty('consigners');
+                    }},
+                {title: "Toll Reason", field: "toll_reason", widthGrow: 1.2, editor: canEdit ? "input" : false,
+                    formatter: function(cell) {
+                        return cell.getRow().getData().toll_applicable ? '<span style="color:#cbd5e1">—</span>' : (cell.getValue() || '');
+                    }},
                 {title: "Equipment", field: "equipment_names", widthGrow: 1.2, formatter: cargoPillFormatter,
                     editor: canEdit ? makeMultiSelectEditor(equipmentNames) : false},
                 canEdit ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 60, widthGrow: 0, hozAlign: "center", headerSort: false,
@@ -1355,7 +1371,8 @@
             doc_date: getTodayDate(),
             doc_status: 'Draft',
             vcn_doc_series: defaultDocSeries,
-            type_of_discharge: 'Full Discharge'
+            type_of_discharge: 'Full Discharge',
+            discharge_port: defaultDischargePort
         }, true);
     }
 

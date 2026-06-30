@@ -123,7 +123,7 @@ def delete_header(row_id):
 _CONSIGNER_COLS = ['igm_line_no', 'bl_no', 'bl_date', 'cargo_name', 'quantity',
                    'consigner_name', 'importer_name',
                    'pipeline_name', 'unload_terminal',
-                   'toll_applicable', 'equipment_names']
+                   'toll_applicable', 'toll_reason', 'equipment_names']
 
 
 def get_equipment():

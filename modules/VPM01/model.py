@@ -6,8 +6,9 @@ def get_all():
     """Ports with their codes for dropdowns (search by code or name)."""
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute(f"SELECT name, port_code FROM {TABLE} WHERE name IS NOT NULL AND name != '' ORDER BY name ASC")
-    rows = [{'name': r['name'], 'port_code': r['port_code'] or ''} for r in cur.fetchall()]
+    cur.execute(f"SELECT name, port_code, is_default_discharge FROM {TABLE} WHERE name IS NOT NULL AND name != '' ORDER BY name ASC")
+    rows = [{'name': r['name'], 'port_code': r['port_code'] or '',
+             'is_default_discharge': bool(r['is_default_discharge'])} for r in cur.fetchall()]
     conn.close()
     return rows
 
@@ -26,12 +27,20 @@ def save_data(data):
     cur = get_cursor(conn)
     name = data.get('name', '')
     port_code = data.get('port_code') or None
+    is_def = bool(data.get('is_default_discharge'))
+
+    # only one default discharge port — clear every row first (the partial unique
+    # index rejects a second TRUE within the same statement otherwise)
+    if is_def:
+        cur.execute(f"UPDATE {TABLE} SET is_default_discharge=FALSE")
 
     if data.get('id'):
-        cur.execute(f"UPDATE {TABLE} SET name=%s, port_code=%s WHERE id=%s", [name, port_code, data['id']])
+        cur.execute(f"UPDATE {TABLE} SET name=%s, port_code=%s, is_default_discharge=%s WHERE id=%s",
+                    [name, port_code, is_def, data['id']])
         row_id = data['id']
     else:
-        cur.execute(f"INSERT INTO {TABLE} (name, port_code) VALUES (%s, %s) RETURNING id", [name, port_code])
+        cur.execute(f"INSERT INTO {TABLE} (name, port_code, is_default_discharge) VALUES (%s, %s, %s) RETURNING id",
+                    [name, port_code, is_def])
         row_id = cur.fetchone()['id']
     conn.commit()
     conn.close()
