@@ -128,6 +128,15 @@ def save():
     else:
         data['doc_status'] = 'Draft'
 
+    # Post-departure SOF times persist only once every LUEU01 parcel is completed
+    # (actual End set). The grid also blocks them, but enforce here so the async
+    # UI check can't be out-raced.
+    gated = ['cast_off_datetime', 'pilot_board_departure', 'pilot_disembarked']
+    if not is_new and any(g in data for g in gated):
+        if not model.parcels_completion(data['id']).get('all_done'):
+            for g in gated:
+                data.pop(g, None)
+
     try:
         row_id, doc_num = model.save_header(data)
     except ValueError as e:
