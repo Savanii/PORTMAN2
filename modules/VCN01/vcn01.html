@@ -1266,10 +1266,12 @@
     }
 
     async function addSubRow(type, vcnId) {
+        const seed = {vcn_id: vcnId};
+        if (type === 'consigners') seed.toll_applicable = true;   // Toll on by default
         const res = await fetch(`/api/module/VCN01/${type}/save`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({vcn_id: vcnId})
+            body: JSON.stringify(seed)
         });
         const data = await res.json();
         if (!data.success && data.error) {
@@ -1278,6 +1280,7 @@
         }
         if (data.id && subTables[vcnId] && subTables[vcnId][type]) {
             const newRow = {id: data.id, vcn_id: vcnId};
+            if (type === 'consigners') newRow.toll_applicable = true;
             if (type === 'export_cargo' && defaultUom) {
                 newRow.quantity_uom = defaultUom;
             }

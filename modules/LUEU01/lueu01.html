@@ -46,6 +46,7 @@
   const parcelTargets = {};  // parcel_op_id -> target qty (for Remaining)
   const parcelStart = {};    // parcel_op_id -> start_dt 'YYYY-MM-DDTHH:MM'
   const parcelEnd = {};      // parcel_op_id -> end_dt
+  const parcelEquip = {};    // parcel_op_id -> equipment chosen on the VCN parcel (comma list)
   let _suppress = false;     // guard against re-entrant cellEdited during clamping
 
   function list(vals) { return {values: vals, autocomplete:true, allowEmpty:true, listOnEmpty:true}; }
@@ -279,6 +280,7 @@
       parcelTargets[p.parcel_op_id] = p.target_qty || 0;
       parcelStart[p.parcel_op_id] = p.start_dt || '';
       parcelEnd[p.parcel_op_id] = p.end_dt || '';
+      parcelEquip[p.parcel_op_id] = p.equipment_names || '';
     });
     const dis = canEdit ? '' : 'disabled';
     listEl.innerHTML = parcels.map(p => {
@@ -423,9 +425,13 @@
       date = start ? start.slice(0, 10) : new Date().toISOString().slice(0, 10);
       from = start ? start.slice(11, 16) : '';
     }
+    // default equipment from the VCN parcel (first of any multi-select); when set,
+    // medium must be Equipment or save_log would null the equipment out.
+    const equip = (parcelEquip[pid] || '').split(',')[0].trim();
     t.addRow({
       parcel_op_id: pid, entry_date: date, from_time: from, shift: currentShift(),
-      medium: 'Direct Pipe', quantity_uom: masters.uom.default, berth_name: defaultBerth
+      medium: equip ? 'Equipment' : 'Direct Pipe', equipment_name: equip,
+      quantity_uom: masters.uom.default, berth_name: defaultBerth
     }, false).then(row => { recomputeTotals(pid); row.scrollTo().catch(() => {}); });
   }
 

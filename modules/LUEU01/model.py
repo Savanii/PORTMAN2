@@ -71,12 +71,15 @@ def get_started_parcels(vcn_id):
     is_export = (row or {}).get('operation_type') == 'Export'
     tbl = 'vcn_export_cargo_declaration' if is_export else 'vcn_consigners'
     qty_col = 'bl_quantity' if is_export else 'quantity'
+    # equipment_names only exists on the import consigner table
+    equip_col = 'NULL' if is_export else 'equipment_names'
     all_ids = sorted({pid for p in parcels for pid in _parse_ids(p['parcel_ids'])})
-    labels, src_qty = {}, {}
+    labels, src_qty, src_equip = {}, {}, {}
     if all_ids:
-        cur.execute(f'SELECT id, parcel_no, {qty_col} AS q FROM {tbl} WHERE id = ANY(%s)', [all_ids])
+        cur.execute(f'SELECT id, parcel_no, {qty_col} AS q, {equip_col} AS equip FROM {tbl} WHERE id = ANY(%s)', [all_ids])
         for r in cur.fetchall():
             labels[r['id']] = r['parcel_no'] or f"#{r['id']}"
+            src_equip[r['id']] = r['equip'] or ''
             try:
                 src_qty[r['id']] = float(str(r['q']).replace(',', '')) if r['q'] is not None else 0.0
             except (ValueError, TypeError):
@@ -113,6 +116,12 @@ def get_started_parcels(vcn_id):
         ids = _parse_ids(p['parcel_ids'])
         target = targets[p['parcel_op_id']]
         logged, hours = agg.get(p['parcel_op_id'], [0.0, 0.0])
+        # distinct equipment chosen on the VCN parcel(s) — default for log lines
+        equip = []
+        for i in ids:
+            for e in str(src_equip.get(i, '')).split(','):
+                if e.strip() and e.strip() not in equip:
+                    equip.append(e.strip())
         out.append({
             'parcel_op_id': p['parcel_op_id'],
             'parcel_no': ', '.join(labels.get(i, f"#{i}") for i in ids) or '—',
@@ -124,6 +133,7 @@ def get_started_parcels(vcn_id):
             'op_hours': round(hours, 2),
             'avg_rate': round(logged / hours, 2) if hours > 0 else 0,
             'uom': 'MT',
+            'equipment_names': ', '.join(equip),
             'expected_start': p['expected_start'],
             'expected_flow_rate': _num(p['expected_flow_rate']),
             'start_dt': p['start_dt'],
