@@ -71,17 +71,19 @@ def get_started_parcels(vcn_id):
     is_export = (row or {}).get('operation_type') == 'Export'
     tbl = 'vcn_export_cargo_declaration' if is_export else 'vcn_consigners'
     qty_col = 'bl_quantity' if is_export else 'quantity'
-    # equipment_names / pipeline_name only exist on the import consigner table
+    # equipment_names / pipeline_name / unload_terminal only exist on the import consigner table
     equip_col = 'NULL' if is_export else 'equipment_names'
     pipe_col = 'NULL' if is_export else 'pipeline_name'
+    term_col = 'NULL' if is_export else 'unload_terminal'
     all_ids = sorted({pid for p in parcels for pid in _parse_ids(p['parcel_ids'])})
-    labels, src_qty, src_equip, src_pipe = {}, {}, {}, {}
+    labels, src_qty, src_equip, src_pipe, src_term = {}, {}, {}, {}, {}
     if all_ids:
-        cur.execute(f'SELECT id, parcel_no, {qty_col} AS q, {equip_col} AS equip, {pipe_col} AS pipe FROM {tbl} WHERE id = ANY(%s)', [all_ids])
+        cur.execute(f'SELECT id, parcel_no, {qty_col} AS q, {equip_col} AS equip, {pipe_col} AS pipe, {term_col} AS term FROM {tbl} WHERE id = ANY(%s)', [all_ids])
         for r in cur.fetchall():
             labels[r['id']] = r['parcel_no'] or f"#{r['id']}"
             src_equip[r['id']] = r['equip'] or ''
             src_pipe[r['id']] = r['pipe'] or ''
+            src_term[r['id']] = r['term'] or ''
             try:
                 src_qty[r['id']] = float(str(r['q']).replace(',', '')) if r['q'] is not None else 0.0
             except (ValueError, TypeError):
@@ -127,11 +129,14 @@ def get_started_parcels(vcn_id):
                         vals.append(x.strip())
             return vals
         equip = _distinct(src_equip)
+        # terminal from the live VCN consigner (unload_terminal); fall back to the
+        # op snapshot (covers export parcels + legacy rows without a source terminal)
+        terminals = _distinct(src_term)
         out.append({
             'parcel_op_id': p['parcel_op_id'],
             'parcel_no': ', '.join(labels.get(i, f"#{i}") for i in ids) or '—',
             'cargo_name': p['cargo_name'] or '',
-            'terminal_name': p['terminal_name'] or '',
+            'terminal_name': ', '.join(terminals) or (p['terminal_name'] or ''),
             'target_qty': round(target, 3),
             'logged_qty': round(logged, 3),
             'remaining_qty': round(target - logged, 3),
