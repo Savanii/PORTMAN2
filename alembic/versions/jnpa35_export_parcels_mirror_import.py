@@ -6,14 +6,14 @@ pipeline_name, unload_terminal, toll_applicable, toll_reason, equipment_names)
 and drop the legacy EGM / customer / UOM / billing-tracking columns. No BL No or
 BL Date on export. Legacy export rows are dropped (dev cutover, not migrated).
 
-Revision ID: jnpa35_export_parcels_mirror_import
+Revision ID: jnpa35_export_parcel_mirror
 Revises: jnpa34_ldud_pilot_pickup_time
 Create Date: 2026-07-01
 """
 from typing import Sequence, Union
 from alembic import op
 
-revision: str = 'jnpa35_export_parcels_mirror_import'
+revision: str = 'jnpa35_export_parcel_mirror'
 down_revision: Union[str, None] = 'jnpa34_ldud_pilot_pickup_time'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
