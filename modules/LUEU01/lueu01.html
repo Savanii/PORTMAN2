@@ -324,6 +324,11 @@
           ${canEdit ? `<div style="margin:4px 0;">
             <button class="lueu-btn" onclick="addLogRow(${p.parcel_op_id}, '${berth.replace(/'/g, "\\'")}')">+ Add</button>
             <button class="lueu-btn secondary" onclick="saveLog(${p.parcel_op_id})">Save</button>
+            ${p.is_shortclosed
+              ? `<button class="lueu-btn" style="background:#f59e0b;color:#fff;" onclick="revertShortclose(${p.parcel_op_id})">↺ Revert Short-close</button>`
+              : (p.remaining_qty > 0.01
+                 ? `<button class="lueu-btn" style="background:#dc2626;color:#fff;" onclick="shortcloseParcel(${p.parcel_op_id}, ${r3(p.remaining_qty)})">Shortclose Remaining (${r3(p.remaining_qty)} MT)</button>`
+                 : '')}
           </div>` : ''}
           <div id="log-table-${p.parcel_op_id}"></div>
         </div></div>`;
@@ -408,6 +413,12 @@
       ajaxURL: `/api/module/LUEU01/log/${pid}`,
       columnDefaults: {headerSort: false},
       columns: logColumns(),
+      rowFormatter: function(row) {
+        if (row.getData().is_shortclose) {
+          row.getElement().style.background = '#fef3c7';
+          row.getElement().title = 'Short-close: leftover quantity written off (excluded from Avg rate). Use “Revert Short-close” to undo.';
+        }
+      },
       dataLoaded: function() { recomputeTotals(pid); }
     });
   }
@@ -479,6 +490,28 @@
     row.delete();
     await maybeAutoEnd(d.parcel_op_id);  // re-evaluate completion after removal
     renderParcels();
+  }
+
+  async function shortcloseParcel(pid, remaining) {
+    if (!confirm(`Short-close the remaining ${remaining} MT for this parcel?\nThis records the leftover with no time so Remaining becomes 0. It's excluded from the Avg rate and can be reverted.`)) return;
+    const res = await fetch('/api/module/LUEU01/parcel/shortclose', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({parcel_op_id: pid})
+    });
+    const j = await res.json();
+    if (!j.success) { alert(j.error || 'Short-close failed'); return; }
+    await refreshInPlace();
+  }
+
+  async function revertShortclose(pid) {
+    if (!confirm('Revert the short-close and restore the remaining quantity?')) return;
+    const res = await fetch('/api/module/LUEU01/parcel/shortclose/revert', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({parcel_op_id: pid})
+    });
+    const j = await res.json();
+    if (!j.success) { alert(j.error || 'Revert failed'); return; }
+    await refreshInPlace();
   }
 
   async function refreshInPlace() {

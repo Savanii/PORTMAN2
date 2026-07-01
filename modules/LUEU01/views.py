@@ -102,6 +102,38 @@ def delete_log():
     return jsonify({'success': True, 'deleted_count': len(ids)})
 
 
+@bp.route('/api/module/LUEU01/parcel/shortclose', methods=['POST'])
+@login_required
+def shortclose_parcel():
+    perms = get_perms()
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'success': False, 'error': 'No permission'}), 403
+    pid = (request.json or {}).get('parcel_op_id')
+    if not pid:
+        return jsonify({'success': False, 'error': 'Missing parcel_op_id'}), 400
+    try:
+        model.shortclose_parcel(pid, session.get('username'))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)})
+    return jsonify({'success': True})
+
+
+@bp.route('/api/module/LUEU01/parcel/shortclose/revert', methods=['POST'])
+@login_required
+def revert_shortclose():
+    perms = get_perms()
+    if not perms.get('can_delete'):
+        return jsonify({'success': False, 'error': 'No permission to revert'}), 403
+    pid = (request.json or {}).get('parcel_op_id')
+    if not pid:
+        return jsonify({'success': False, 'error': 'Missing parcel_op_id'}), 400
+    try:
+        model.revert_shortclose(pid, session.get('username'))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)})
+    return jsonify({'success': True})
+
+
 def _names(sql):
     conn = get_db(); cur = get_cursor(conn)
     cur.execute(sql); rows = cur.fetchall(); conn.close()

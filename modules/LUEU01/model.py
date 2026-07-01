@@ -102,24 +102,28 @@ def get_started_parcels(vcn_id):
     pop_ids = [p['parcel_op_id'] for p in parcels]
     agg = {}  # parcel_op_id -> [logged_qty, hours]
     if pop_ids:
-        cur.execute('''SELECT parcel_op_id, from_time, to_time, COALESCE(quantity,0) AS q
+        cur.execute('''SELECT parcel_op_id, from_time, to_time, COALESCE(quantity,0) AS q, is_shortclose
                        FROM lueu_parcel_log
                        WHERE parcel_op_id = ANY(%s) AND is_deleted IS NOT TRUE
-                       ORDER BY parcel_op_id, entry_date, from_time, id''', [pop_ids])
+                       ORDER BY parcel_op_id, entry_date, from_time NULLS LAST, id''', [pop_ids])
         for r in cur.fetchall():
-            a = agg.setdefault(r['parcel_op_id'], [0.0, 0.0])
+            a = agg.setdefault(r['parcel_op_id'], [0.0, 0.0, 0.0])  # [real_qty, hours, shortclose_qty]
             tgt = targets.get(r['parcel_op_id'], 0)
-            if tgt > 0 and a[0] >= tgt - 1e-6:
+            if tgt > 0 and (a[0] + a[2]) >= tgt - 1e-6:
                 continue  # parcel already complete — ignore this row
-            a[0] += float(r['q'] or 0)
-            a[1] += _hours(r['from_time'], r['to_time'])
+            if r['is_shortclose']:
+                a[2] += float(r['q'] or 0)  # counts toward completion, NOT toward avg rate
+            else:
+                a[0] += float(r['q'] or 0)
+                a[1] += _hours(r['from_time'], r['to_time'])
     conn.close()
 
     out = []
     for p in parcels:
         ids = _parse_ids(p['parcel_ids'])
         target = targets[p['parcel_op_id']]
-        logged, hours = agg.get(p['parcel_op_id'], [0.0, 0.0])
+        logged_real, hours, shortclosed = agg.get(p['parcel_op_id'], [0.0, 0.0, 0.0])
+        logged = logged_real + shortclosed  # total toward target (Remaining)
         # distinct equipment / pipelines across the VCN parcel(s)
         def _distinct(src):
             vals = []
@@ -141,7 +145,8 @@ def get_started_parcels(vcn_id):
             'logged_qty': round(logged, 3),
             'remaining_qty': round(target - logged, 3),
             'op_hours': round(hours, 2),
-            'avg_rate': round(logged / hours, 2) if hours > 0 else 0,
+            'avg_rate': round(logged_real / hours, 2) if hours > 0 else 0,
+            'is_shortclosed': shortclosed > 1e-6,
             'uom': 'MT',
             'equipment_names': ', '.join(equip),
             'pipeline_name': ', '.join(_distinct(src_pipe)),
@@ -225,3 +230,72 @@ def soft_delete_log(ids, username):
                        WHERE id=%s AND is_deleted IS NOT TRUE''', [username, today, log_id])
     conn.commit()
     conn.close()
+
+
+def _single_parcel_target(cur, parcel_op_id):
+    """Target qty for one parcel-op: sum of its VCN parcel quantities (import or
+    export source table), falling back to the op snapshot quantity. Mirrors the
+    per-parcel target logic in get_started_parcels."""
+    cur.execute('''SELECT po.parcel_ids, po.quantity AS op_qty, l.vcn_id
+                   FROM ldud_parcel_ops po JOIN ldud_header l ON l.id = po.ldud_id
+                   WHERE po.id=%s''', [parcel_op_id])
+    row = cur.fetchone()
+    if not row:
+        return 0.0
+    ids = _parse_ids(row['parcel_ids'])
+    cur.execute('SELECT operation_type FROM vcn_header WHERE id=%s', [row['vcn_id']])
+    op = cur.fetchone()
+    tbl = 'vcn_export_cargo_declaration' if (op or {}).get('operation_type') == 'Export' else 'vcn_consigners'
+    total = 0.0
+    if ids:
+        cur.execute(f'SELECT quantity FROM {tbl} WHERE id = ANY(%s)', [ids])
+        for r in cur.fetchall():
+            try:
+                total += float(str(r['quantity']).replace(',', '')) if r['quantity'] else 0.0
+            except (ValueError, TypeError):
+                pass
+    return total or float(row['op_qty'] or 0)
+
+
+def shortclose_parcel(parcel_op_id, username):
+    """Close a parcel's leftover quantity: insert one flagged, timeless log row
+    carrying the remaining qty so Remaining -> 0. Raises ValueError if nothing
+    is left to close. Reversible via revert_shortclose."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    target = _single_parcel_target(cur, parcel_op_id)
+    cur.execute('''SELECT COALESCE(SUM(quantity), 0) AS q FROM lueu_parcel_log
+                   WHERE parcel_op_id=%s AND is_deleted IS NOT TRUE''', [parcel_op_id])
+    logged = float(cur.fetchone()['q'] or 0)
+    remaining = round(target - logged, 3)
+    if remaining <= 1e-6:
+        conn.close()
+        raise ValueError('Nothing to short-close — no remaining quantity')
+    today = datetime.now().strftime('%Y-%m-%d')
+    cur.execute('''INSERT INTO lueu_parcel_log
+                   (parcel_op_id, entry_date, quantity, quantity_uom, is_shortclose,
+                    remarks, created_by, created_date)
+                   VALUES (%s, %s, %s, 'MT', TRUE, 'Short close', %s, %s) RETURNING id''',
+                [parcel_op_id, today, remaining, username, today])
+    row_id = cur.fetchone()['id']
+    conn.commit()
+    conn.close()
+    return row_id
+
+
+def revert_shortclose(parcel_op_id, username):
+    """Undo a short-close: soft-delete the parcel's short-close row(s), restoring
+    the previous Remaining and avg rate. Raises ValueError if there is none."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    today = datetime.now().strftime('%Y-%m-%d')
+    cur.execute('''UPDATE lueu_parcel_log
+                   SET is_deleted=TRUE, deleted_by=%s, deleted_date=%s
+                   WHERE parcel_op_id=%s AND is_shortclose IS TRUE AND is_deleted IS NOT TRUE''',
+                [username, today, parcel_op_id])
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    if not n:
+        raise ValueError('No short-close to revert')
+    return n
