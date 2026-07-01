@@ -578,6 +578,38 @@ def save_smtp_config_route():
     return jsonify({'success': True})
 
 
+@bp.route('/api/smtp-config/test', methods=['POST'])
+@admin_required
+def test_smtp_config():
+    """Send a one-off test mail using the posted (unsaved) config values."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    data = request.json or {}
+    to_email = (data.get('to_email') or '').strip()
+    if not to_email:
+        return jsonify({'error': 'Recipient email is required.'}), 400
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = 'PORTMAN SMTP Test'
+        msg['From'] = f"{data.get('from_name') or 'PORTMAN'} <{data.get('from_email')}>"
+        msg['To'] = to_email
+        msg.attach(MIMEText(
+            f"This is a test email from PORTMAN sent by {session.get('username')}. "
+            "If you received this, SMTP is configured correctly.", 'plain'))
+
+        server = smtplib.SMTP(data.get('host'), int(data.get('port') or 587), timeout=15)
+        if data.get('use_tls'):
+            server.starttls()
+        server.login(data.get('username'), data.get('password'))
+        server.sendmail(data.get('from_email'), [to_email], msg.as_string())
+        server.quit()
+        return jsonify({'success': True, 'message': f'Test mail sent to {to_email}'})
+    except Exception as e:
+        return jsonify({'error': str(e)[:500]}), 500
+
+
 @bp.route('/api/mail-queue')
 @admin_required
 def get_mail_queue():

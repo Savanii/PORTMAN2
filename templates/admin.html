@@ -317,6 +317,8 @@
             </label>
             <button class="btn btn-save" onclick="saveSmtpConfig()">Save Config</button>
             <button class="btn" style="background:#e2e8f0;color:#2d3748;border:1px solid #cbd5e0;" onclick="sendMailNow()">Send Now</button>
+            <input type="email" id="smtpTestTo" placeholder="test@domain.com" style="padding:6px;box-sizing:border-box;width:180px;">
+            <button class="btn" style="background:#e2e8f0;color:#2d3748;border:1px solid #cbd5e0;" onclick="sendTestMail()">Send Test</button>
             <span id="smtpStatus" style="font-size:11px;"></span>
         </div>
         <div class="config-panel" style="display:block;margin-top:12px;">
@@ -1291,6 +1293,29 @@ async function saveSmtpConfig() {
     });
     if (res.ok) { status.textContent = 'Saved!'; status.style.color = '#276749'; setTimeout(()=>status.textContent='',2000); }
     else { status.textContent = 'Failed to save'; status.style.color = '#c53030'; }
+}
+
+async function sendTestMail() {
+    const status = document.getElementById('smtpStatus');
+    const to = document.getElementById('smtpTestTo').value.trim();
+    if (!to) { status.textContent = 'Enter a test recipient'; status.style.color = '#c53030'; return; }
+    status.textContent = 'Sending test...'; status.style.color = '#c05621';
+    const data = {
+        to_email:   to,
+        host:       document.getElementById('smtpHost').value.trim(),
+        port:       parseInt(document.getElementById('smtpPort').value) || 587,
+        username:   document.getElementById('smtpUsername').value.trim(),
+        password:   document.getElementById('smtpPassword').value,
+        from_email: document.getElementById('smtpFromEmail').value.trim(),
+        from_name:  document.getElementById('smtpFromName').value.trim() || 'PORTMAN',
+        use_tls:    document.getElementById('smtpUseTls').checked,
+    };
+    const res = await fetch('/admin/api/smtp-config/test', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)
+    });
+    const d = await res.json();
+    if (res.ok) { status.textContent = d.message || 'Test sent!'; status.style.color = '#276749'; setTimeout(()=>status.textContent='',4000); }
+    else { status.textContent = d.error || 'Test failed'; status.style.color = '#c53030'; }
 }
 
 async function loadMailQueue() {
