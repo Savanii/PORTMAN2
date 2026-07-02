@@ -167,7 +167,6 @@
 
 <script>
 let billableData = null;
-let serviceTypesMap = {};
 let gstRatesMap = {};
 let customerData = null;
 
@@ -177,13 +176,6 @@ function formatDateDMY(value) {
     const m = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (m) return `${m[3]}-${m[2]}-${m[1]}`;
     return text;
-}
-
-// Load service types with GST info
-async function loadServiceTypes() {
-    const resp = await fetch('/api/module/FIN01/service-types');
-    const json = await resp.json();
-    (json.data || []).forEach(st => { serviceTypesMap[st.id] = st; });
 }
 
 async function loadCustomers() {
@@ -316,7 +308,6 @@ async function generateBill() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    loadServiceTypes();
     loadCustomers();
 });
 
