@@ -659,6 +659,11 @@ def generate_bill(data, created_by, bill_status):
     computed amounts), then records totals, bill_vessels, and the parcel ledger.
     Returns (bill_id, bill_number). No MBC — only VCN_IMPORT/VCN_EXPORT lines."""
     lines = data.get('lines') or []
+    if not lines:
+        raise ValueError('No lines to bill')
+    for l in lines:
+        if not l.get('cargo_source_type') or not l.get('cargo_source_id') or not l.get('vcn_id'):
+            raise ValueError('Each bill line needs cargo_source_type, cargo_source_id and vcn_id')
     vcn_ids = sorted({l['vcn_id'] for l in lines if l.get('vcn_id')})
 
     conn = get_db()
