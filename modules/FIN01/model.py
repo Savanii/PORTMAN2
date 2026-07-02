@@ -653,6 +653,76 @@ def is_vcn_billed(vcn_id):
     return billed
 
 
+def generate_bill(data, created_by, bill_status):
+    """Create ONE bill across the selected vessels. Reuses save_bill_header
+    (numbering) and save_bill_line (GST/TDS calc, mutates the line dict with the
+    computed amounts), then records totals, bill_vessels, and the parcel ledger.
+    Returns (bill_id, bill_number). No MBC — only VCN_IMPORT/VCN_EXPORT lines."""
+    lines = data.get('lines') or []
+    vcn_ids = sorted({l['vcn_id'] for l in lines if l.get('vcn_id')})
+
+    conn = get_db()
+    cur = get_cursor(conn)
+    docs = []
+    if vcn_ids:
+        cur.execute("SELECT vcn_doc_num FROM vcn_header WHERE id = ANY(%s) ORDER BY vcn_doc_num", [vcn_ids])
+        docs = [r['vcn_doc_num'] for r in cur.fetchall() if r['vcn_doc_num']]
+    conn.close()
+
+    header = {
+        'source_type': 'MULTI', 'source_id': None,
+        'source_display': ', '.join(docs),
+        'customer_type': data.get('customer_type'), 'customer_id': data.get('customer_id'),
+        'customer_name': data.get('customer_name'), 'customer_gstin': data.get('customer_gstin'),
+        'customer_gst_state_code': data.get('customer_gst_state_code'),
+        'customer_gl_code': data.get('customer_gl_code'),
+        'currency_code': data.get('currency_code') or 'INR',
+        'agreement_id': data.get('agreement_id') or None,
+        'bill_status': bill_status,
+        'bill_date': data.get('bill_date') or datetime.now().strftime('%Y-%m-%d'),
+        'created_by': created_by,
+        'created_date': datetime.now().strftime('%Y-%m-%d'),
+    }
+    bill_id, bill_number = save_bill_header(header)
+
+    subtotal = cgst = sgst = igst = 0.0
+    for l in lines:
+        line_amount = round(float(l.get('quantity') or 0) * float(l.get('rate') or 0), 2)
+        ld = {
+            'bill_id': bill_id, 'service_type_id': l.get('service_type_id'),
+            'service_code': l.get('service_code'), 'service_name': l.get('service_name'),
+            'service_description': l.get('service_name'),
+            'quantity': l.get('quantity'), 'uom': l.get('uom'), 'rate': l.get('rate'),
+            'line_amount': line_amount, 'gst_rate_id': l.get('gst_rate_id'),
+            'sac_code': l.get('sac_code'), 'gl_code': l.get('gl_code'),
+            'tds_applicable': l.get('tds_applicable'), 'tds_percent': l.get('tds_percent'),
+            'cargo_source_type': l.get('cargo_source_type'), 'cargo_source_id': l.get('cargo_source_id'),
+            'customer_gstin': data.get('customer_gstin'),
+            'customer_state_code': data.get('customer_gst_state_code'),
+        }
+        save_bill_line(ld)  # computes + stores cgst/sgst/igst/tds/line_total on ld and the row
+        subtotal += line_amount
+        cgst += float(ld.get('cgst_amount') or 0)
+        sgst += float(ld.get('sgst_amount') or 0)
+        igst += float(ld.get('igst_amount') or 0)
+
+    total = round(subtotal + cgst + sgst + igst, 2)
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('''UPDATE bill_header
+        SET subtotal=%s, cgst_amount=%s, sgst_amount=%s, igst_amount=%s, total_amount=%s
+        WHERE id=%s''', [subtotal, cgst, sgst, igst, total, bill_id])
+    for vid in vcn_ids:
+        cur.execute('INSERT INTO bill_vessels (bill_id, vcn_id) VALUES (%s, %s)', [bill_id, vid])
+    for l in lines:
+        record_parcel_charge(cur, l.get('cargo_source_type'), l.get('cargo_source_id'),
+                             l.get('service_type_id'), l.get('service_code'), bill_id,
+                             float(l.get('quantity') or 0), created_by)
+    conn.commit()
+    conn.close()
+    return bill_id, bill_number
+
+
 # ===== BILLABLES ENGINE (parcels -> 4 charges, grouped by vessel) =====
 
 _CARGO_GATE = ('Closed', 'Partial Close')

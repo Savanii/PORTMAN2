@@ -309,6 +309,34 @@ def save_bill():
     return jsonify({'success': True, 'id': row_id, 'bill_number': bill_number})
 
 
+@bp.route('/api/module/FIN01/bill/generate', methods=['POST'])
+def bill_generate():
+    """Generate one bill across selected vessels from picked billable lines."""
+    if 'user_id' not in session:
+        return jsonify({'success': False, 'error': 'Not logged in'})
+    perms = get_user_permissions(session['user_id'], 'FIN01')
+    if not perms['can_add']:
+        return jsonify({'success': False, 'error': 'No add permission'})
+
+    data = request.json or {}
+    lines = data.get('lines') or []
+    if not lines:
+        return jsonify({'success': False, 'error': 'No lines selected'})
+    if any(float(l.get('rate') or 0) <= 0 for l in lines):
+        return jsonify({'success': False, 'error': 'Every selected line needs a rate greater than 0'})
+
+    config = get_module_config('FIN01')
+    bill_status = 'Pending Approval' if config.get('approval_add') else 'Draft'
+    try:
+        bill_id, bill_number = model.generate_bill(data, session.get('username'), bill_status)
+    except Exception as e:
+        return jsonify({'success': False, 'error': 'Generate failed: ' + str(e)})
+
+    if bill_status == 'Pending Approval':
+        _queue_bill_approval_request(bill_id, bill_number, data.get('customer_name'), None)
+    return jsonify({'success': True, 'id': bill_id, 'bill_number': bill_number})
+
+
 @bp.route('/api/module/FIN01/bill/approve', methods=['POST'])
 def approve_bill():
     """Approve a bill - only approver or admin"""
