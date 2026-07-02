@@ -69,7 +69,7 @@ def entry(agreement_id=None):
 
     # Identify cargo handling service type IDs (CHGL01, CHGU01)
     cargo_service_ids = [s['id'] for s in service_types
-                         if s.get('service_code') in ('CHGL01', 'CHGU01')]
+                         if s.get('service_code') in ('CHGL01', 'CHGU01', 'INFM01')]
 
     header_data = None
     lines_data = []
