@@ -55,8 +55,11 @@ def test_export_approval_eligibility_and_picker_no_dropped_columns():
                    VALUES ('Export','V','A','Bulk','PORTX') RETURNING id""")
     vcn_id = cur.fetchone()['id']; conn.commit(); conn.close()
     try:
+        # all six closure-required fields set so eligibility passes under the
+        # strict per-parcel rule (see get_approval_eligibility)
         model.save_export_cargo_declaration({'vcn_id': vcn_id, 'cargo_name': 'EDIBLE OIL',
-            'quantity': '50', 'consigner_name': 'ABS'})
+            'quantity': '50', 'consigner_name': 'ABS', 'importer_name': 'ABS',
+            'pipeline_name': 'PL1', 'unload_terminal': 'T1'})
         elig = model.get_approval_eligibility(vcn_id)   # must not raise UndefinedColumn
         assert elig['eligible'] is True, elig
         picker = model.get_picker_parcels(vcn_id)       # must not raise
