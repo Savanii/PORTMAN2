@@ -248,7 +248,7 @@ def _apply_record(rec):
     posting_date_value = posting_date or now
     if table == 'invoice_header':
         # invoice_header date columns are now properly typed (migration
-        # c7d8e9f0a1b2): sap_posting_date=TIMESTAMP, gst_ack_date=DATE.
+        # jnpa41_invoice_sap_date_types): sap_posting_date=TIMESTAMP, gst_ack_date=DATE.
         cur.execute('''UPDATE invoice_header SET
             sap_document_number = COALESCE(NULLIF(%s,''), sap_document_number),
             sap_posting_date    = COALESCE(NULLIF(%s,'')::timestamp, sap_posting_date),
