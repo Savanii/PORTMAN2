@@ -6,6 +6,7 @@ from database import get_user_permissions, get_db, get_cursor, get_module_config
 from mail_service import notify_module_approver, get_module_approver_info, build_approval_mail_html
 import sap_builder
 import sap_client
+import sap_queue
 import logging
 
 log = logging.getLogger(__name__)
@@ -246,6 +247,123 @@ def _auto_post_to_sap(invoice_id, invoice_number):
         return {'ok': False, 'message': str(e)}
 
 
+def create_invoice_record(customer_type, customer_id, bill_ids, created_by, overrides=None):
+    """Create an invoice from selected bills: header + lines (copied from
+    bill_lines) + bill mapping (invoice_bill_mapping), numbered against the
+    default invoice_doc_series. Shared by POST /invoice/create and callable
+    directly (e.g. from tests) — this is the one place invoice-creation
+    logic lives.
+
+    `overrides` optionally supplies/overwrites any invoice_header field
+    (frontend-computed subtotal/GST amounts, ship-to, vessel snapshot,
+    remarks, virtual_account_id, doc_series_prefix, invoice_date, ...). Any
+    non-None value in `overrides` wins over the default computed here from
+    the bill(s). Returns the new invoice_id.
+    """
+    if not bill_ids:
+        raise ValueError('No bills selected')
+    overrides = dict(overrides or {})
+
+    conn = get_db()
+    cur = get_cursor(conn)
+    default_series = _get_default_invds_series(cur) or {}
+
+    cur.execute('SELECT * FROM bill_header WHERE id=%s', [bill_ids[0]])
+    first_bill = cur.fetchone()
+    if not first_bill:
+        conn.close()
+        raise ValueError(f'Bill {bill_ids[0]} not found')
+    first_bill = dict(first_bill)
+
+    customer_type = customer_type or first_bill.get('customer_type')
+    customer_id = customer_id or first_bill.get('customer_id')
+    customer_master = _get_customer_master_snapshot(cur, customer_type, customer_id)
+
+    doc_series_prefix = (
+        default_series.get('prefix') or overrides.get('doc_series_prefix') or 'INV'
+    ).strip().rstrip('/').upper()
+
+    invoice_date = overrides.get('invoice_date') or str(first_bill.get('bill_date') or '')[:10]
+    if not invoice_date:
+        invoice_date = datetime.now().strftime('%Y-%m-%d')
+
+    fy_suffix = model.get_financial_year(invoice_date)
+    cur.execute(
+        'SELECT MAX(doc_series_seq) FROM invoice_header WHERE doc_series=%s AND financial_year=%s',
+        [doc_series_prefix, fy_suffix]
+    )
+    row_seq = cur.fetchone()
+    next_seq = (row_seq['max'] or 0) + 1 if row_seq else 1
+
+    # Default header totals from the bill(s) themselves — the request path
+    # (create_invoice view) normally overrides these with frontend-computed
+    # figures via `overrides`; direct callers (tests) get sane totals for free.
+    cur.execute('''
+        SELECT COALESCE(SUM(subtotal),0)     AS subtotal,
+               COALESCE(SUM(total_amount),0) AS total_amount,
+               COALESCE(SUM(cgst_amount),0)  AS cgst_amount,
+               COALESCE(SUM(sgst_amount),0)  AS sgst_amount,
+               COALESCE(SUM(igst_amount),0)  AS igst_amount
+        FROM bill_header WHERE id = ANY(%s)
+    ''', [bill_ids])
+    totals = dict(cur.fetchone() or {})
+    conn.close()
+
+    invoice_data = {
+        'invoice_date': invoice_date,
+        'invoice_series': doc_series_prefix,
+        'doc_series': doc_series_prefix,
+        'doc_series_seq': next_seq,
+        'customer_type': customer_type,
+        'customer_id': customer_id,
+        'customer_name': first_bill.get('customer_name'),
+        'customer_gstin': first_bill.get('customer_gstin'),
+        'customer_gst_state_code': first_bill.get('customer_gst_state_code'),
+        'customer_gl_code': first_bill.get('customer_gl_code'),
+        'customer_pan': customer_master.get('pan'),
+        'customer_cin': customer_master.get('cin'),
+        'billing_address': customer_master.get('billing_address'),
+        'customer_city': customer_master.get('city'),
+        'customer_pincode': customer_master.get('pincode'),
+        'customer_phone': customer_master.get('contact_phone'),
+        'customer_email': customer_master.get('contact_email'),
+        'currency_code': 'INR',
+        'exchange_rate': 1.0,
+        'subtotal': totals.get('subtotal'),
+        'cgst_amount': totals.get('cgst_amount'),
+        'sgst_amount': totals.get('sgst_amount'),
+        'igst_amount': totals.get('igst_amount'),
+        'tds_amount': 0,
+        'tcs_amount': 0,
+        'round_off': 0,
+        'total_amount': totals.get('total_amount'),
+        'created_by': created_by,
+        'created_date': datetime.now().strftime('%Y-%m-%d'),
+        '_invoice_number_override': f'{doc_series_prefix}/{next_seq}',
+    }
+    for key, val in overrides.items():
+        if key == 'doc_series_prefix' or val is None:
+            continue
+        invoice_data[key] = val
+
+    invoice_id, invoice_number = model.create_invoice_from_bills(bill_ids, invoice_data)
+
+    # Queue async SAP posting (Task 3's sap_outbound_queue) instead of posting
+    # synchronously. Invoice creation must succeed even when SAP config /
+    # service GL mapping isn't ready yet (dev/test envs) — enqueue failures
+    # are logged, never raised. Full SAP wiring (FSAP01 UI, retries) is Task 6.
+    try:
+        invoice = model.get_invoice_by_id(invoice_id)
+        invoice_lines = model.get_invoice_lines(invoice_id)
+        payload = sap_builder.build_invoice_payload(invoice, invoice_lines)
+        sap_queue.enqueue('post', 'Invoice', invoice_id, invoice_number, payload,
+                           invoice_id=invoice_id, created_by=created_by)
+    except Exception:
+        log.warning('SAP enqueue skipped for invoice %s', invoice_number, exc_info=True)
+
+    return invoice_id
+
+
 @bp.route('/api/module/FINV01/invoice/create', methods=['POST'])
 def create_invoice():
     """Create invoice from selected bills"""
@@ -261,98 +379,25 @@ def create_invoice():
     if not bill_ids:
         return jsonify({'success': False, 'error': 'No bills selected'})
 
-    conn_seq = get_db()
-    cur_seq = get_cursor(conn_seq)
-    default_series = _get_default_invds_series(cur_seq) or {}
+    overrides = {k: v for k, v in data.items()
+                 if k not in ('bill_ids', 'customer_type', 'customer_id')}
 
-    cur_seq.execute('SELECT bill_date, customer_type, customer_id FROM bill_header WHERE id=%s', [bill_ids[0]])
-    first_bill = cur_seq.fetchone()
+    try:
+        invoice_id = create_invoice_record(
+            data.get('customer_type'), data.get('customer_id'),
+            bill_ids, session.get('username'), overrides=overrides
+        )
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)})
 
-    customer_type = data.get('customer_type') or (first_bill['customer_type'] if first_bill else '')
-    customer_id = data.get('customer_id') or (first_bill['customer_id'] if first_bill else None)
-    customer_master = _get_customer_master_snapshot(cur_seq, customer_type, customer_id)
-
-    doc_series_prefix = (
-        default_series.get('prefix') or
-        (data.get('doc_series_prefix') or 'INV')
-    ).strip().rstrip('/').upper()
-    doc_series_name = default_series.get('name') or data.get('doc_series_name', '')
-
-    invoice_date = data.get('invoice_date', '')
-    if first_bill and first_bill.get('bill_date'):
-        invoice_date = str(first_bill['bill_date'])[:10]
-
-    fy_suffix = model.get_financial_year(invoice_date) if invoice_date else ''
-    cur_seq.execute(
-        'SELECT MAX(doc_series_seq) FROM invoice_header WHERE doc_series=%s AND financial_year=%s',
-        [doc_series_prefix, fy_suffix]
-    )
-    row_seq = cur_seq.fetchone()
-    next_seq = (row_seq['max'] or 0) + 1 if row_seq else 1
-    conn_seq.close()
-    invoice_number_override = f'{doc_series_prefix}/{next_seq}'
-
-    invoice_data = {
-        'invoice_date': invoice_date,
-        'invoice_series': doc_series_prefix,
-        'doc_series': doc_series_prefix,
-        'doc_series_seq': next_seq,
-        'customer_type': data.get('customer_type'),
-        'customer_id': data.get('customer_id'),
-        'customer_name': data.get('customer_name'),
-        'customer_gstin': data.get('customer_gstin'),
-        'customer_gst_state_code': data.get('customer_gst_state_code'),
-        'customer_gl_code': data.get('customer_gl_code'),
-        'customer_pan': data.get('customer_pan') or customer_master.get('pan'),
-        'customer_cin': data.get('customer_cin') or customer_master.get('cin'),
-        'billing_address': data.get('billing_address') or customer_master.get('billing_address'),
-        'customer_city': data.get('customer_city') or customer_master.get('city'),
-        'customer_pincode': data.get('customer_pincode') or customer_master.get('pincode'),
-        'customer_phone': data.get('customer_phone') or customer_master.get('contact_phone'),
-        'customer_email': data.get('customer_email') or customer_master.get('contact_email'),
-        'ship_to_name': data.get('ship_to_name'),
-        'ship_to_address': data.get('ship_to_address'),
-        'ship_to_gstin': data.get('ship_to_gstin'),
-        'ship_to_state_code': data.get('ship_to_state_code'),
-        'currency_code': data.get('currency_code', 'INR'),
-        'exchange_rate': data.get('exchange_rate', 1.0),
-        'subtotal': data.get('subtotal'),
-        'cgst_amount': data.get('cgst_amount'),
-        'sgst_amount': data.get('sgst_amount'),
-        'igst_amount': data.get('igst_amount'),
-        'tds_amount': data.get('tds_amount', 0),
-        'tcs_amount': data.get('tcs_amount', 0),
-        'round_off': data.get('round_off', 0),
-        'total_amount': data.get('total_amount'),
-        'amount_in_words': data.get('amount_in_words'),
-        'payment_terms': data.get('payment_terms'),
-        'due_date': data.get('due_date'),
-        'vessel_name': data.get('vessel_name'),
-        'vessel_call_no': data.get('vessel_call_no'),
-        'commodity': data.get('commodity'),
-        'date_of_berthing': data.get('date_of_berthing'),
-        'date_of_sailing': data.get('date_of_sailing'),
-        'grt_of_vessel': data.get('grt_of_vessel'),
-        'no_of_days': data.get('no_of_days'),
-        'cargo_quantity': data.get('cargo_quantity'),
-        'no_of_hrs': data.get('no_of_hrs'),
-        'created_by': session.get('username'),
-        'created_date': __import__('datetime').datetime.now().strftime('%Y-%m-%d'),
-        'remarks': data.get('remarks'),
-        'virtual_account_id': data.get('virtual_account_id'),
-        '_invoice_number_override': invoice_number_override,
-    }
-
-    invoice_id, invoice_number = model.create_invoice_from_bills(bill_ids, invoice_data)
-
-    # Auto-post to SAP immediately after creation
-    sap_result = _auto_post_to_sap(invoice_id, invoice_number)
     invoice = model.get_invoice_by_id(invoice_id) or {}
+    invoice_number = invoice.get('invoice_number')
+
     _queue_invoice_review_request(
         invoice_id,
         invoice_number,
-        invoice.get('customer_name') or invoice_data.get('customer_name'),
-        invoice.get('total_amount') or invoice_data.get('total_amount'),
+        invoice.get('customer_name') or data.get('customer_name'),
+        invoice.get('total_amount') or data.get('total_amount'),
         invoice.get('invoice_status'),
     )
 
@@ -360,9 +405,7 @@ def create_invoice():
         'success': True,
         'id': invoice_id,
         'invoice_number': invoice_number,
-        'sap_status': 'Posted to SAP' if sap_result.get('ok') else 'SAP Failed',
-        'sap_document_number': sap_result.get('sap_document_number', ''),
-        'sap_message': sap_result.get('message', ''),
+        'sap_status': invoice.get('invoice_status'),
     })
 
 
@@ -1118,7 +1161,7 @@ def get_customer_bank(customer_type, customer_id):
     return jsonify(result)
 
 
-# ===== Bill → Vessel details (LDUD / VCN / MBC lookup) =====
+# ===== Bill → Vessel details (LDUD / VCN lookup) =====
 
 @bp.route('/api/module/FINV01/bill-vessel-details/<int:bill_id>')
 def get_bill_vessel_details(bill_id):
