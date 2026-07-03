@@ -201,39 +201,37 @@ def generate_invoice():
                          module_code='FINV01')
 
 
-def _auto_post_to_sap(invoice_id, invoice_number):
-    """Auto-post invoice to SAP. Updates status to 'Posted to SAP' or 'SAP Failed'."""
+def _enqueue_invoice_post(invoice_id, invoice_number, created_by=None):
+    """Queue the invoice for async SAP posting (non-blocking).
+
+    The payload is built and saved now so the posting survives SAP being down
+    (e.g. Thursday migration windows). The background worker (sap_queue)
+    retries it up to 10 times, 5 minutes apart; on exhaustion the invoice
+    shows 'SAP Failed' with a Manual Send option. Returns immediately — no
+    synchronous SAP call.
+
+    `created_by` is taken as an explicit argument (rather than read from
+    flask.session) so this is safely callable outside a request context —
+    directly from create_invoice_record, and from tests.
+    """
     try:
         invoice = model.get_invoice_by_id(invoice_id)
         invoice_lines = model.get_invoice_lines(invoice_id)
         payload = sap_builder.build_invoice_payload(invoice, invoice_lines)
-        result = sap_client.post_invoice_to_sap(
-            payload, 'Invoice', invoice_id,
-            invoice_number, session.get('username')
-        )
-        now_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        qid = sap_queue.enqueue(
+            'post', 'Invoice', invoice_id, invoice_number, payload,
+            invoice_id=invoice_id, created_by=created_by)
         conn = get_db()
         cur = get_cursor(conn)
-        if result['ok']:
-            cur.execute('''UPDATE invoice_header
-                SET sap_document_number=%s, sap_posting_date=%s,
-                    posted_by=%s, posted_date=%s,
-                    invoice_status='Posted to SAP'
-                WHERE id=%s''',
-                [result['sap_document_number'], now_ts,
-                 session.get('username'), now_ts, invoice_id])
-        else:
-            cur.execute('''UPDATE invoice_header
-                SET invoice_status='SAP Failed',
-                    sap_error = %s
-                WHERE id=%s''',
-                [result['message'], invoice_id])
+        cur.execute('''UPDATE invoice_header
+            SET invoice_status='Queued for SAP', sap_error=NULL WHERE id=%s''',
+            [invoice_id])
         conn.commit()
         conn.close()
-        return result
+        return {'ok': True, 'queued': True, 'queue_id': qid,
+                'message': 'Queued for SAP posting'}
     except Exception as e:
-        log.exception('Auto-post to SAP failed for invoice %s', invoice_number)
-        # Mark as failed
+        log.exception('Failed to queue invoice %s for SAP', invoice_number)
         try:
             conn = get_db()
             cur = get_cursor(conn)
@@ -348,18 +346,12 @@ def create_invoice_record(customer_type, customer_id, bill_ids, created_by, over
 
     invoice_id, invoice_number = model.create_invoice_from_bills(bill_ids, invoice_data)
 
-    # Queue async SAP posting (Task 3's sap_outbound_queue) instead of posting
+    # Queue async SAP posting (sap_outbound_queue) instead of posting
     # synchronously. Invoice creation must succeed even when SAP config /
-    # service GL mapping isn't ready yet (dev/test envs) — enqueue failures
-    # are logged, never raised. Full SAP wiring (FSAP01 UI, retries) is Task 6.
-    try:
-        invoice = model.get_invoice_by_id(invoice_id)
-        invoice_lines = model.get_invoice_lines(invoice_id)
-        payload = sap_builder.build_invoice_payload(invoice, invoice_lines)
-        sap_queue.enqueue('post', 'Invoice', invoice_id, invoice_number, payload,
-                           invoice_id=invoice_id, created_by=created_by)
-    except Exception:
-        log.warning('SAP enqueue skipped for invoice %s', invoice_number, exc_info=True)
+    # service GL mapping isn't ready yet (dev/test envs) — _enqueue_invoice_post
+    # swallows its own errors (parks the invoice as 'SAP Failed') and never
+    # raises out of invoice creation.
+    _enqueue_invoice_post(invoice_id, invoice_number, created_by=created_by)
 
     return invoice_id
 

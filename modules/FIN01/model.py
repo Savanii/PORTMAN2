@@ -780,3 +780,23 @@ def get_customer_billables(customer_type, customer_id):
             v['total_amount'] = round(v['total_amount'] + amount, 2)
 
     return {'vessels': list(vessels.values())}
+
+
+def unbill_invoice_sources(cur, invoice_id):
+    """Unbill everything behind a cancelled invoice so the cargo can be re-billed.
+
+    For each bill linked via invoice_bill_mapping: reverse the parcel_charge_billed
+    ledger (this releases the VCN billed-lock — the ledger is the authoritative
+    billed-status store; the legacy declaration-column helpers are no-ops now),
+    unmark any service records, and set the bill to 'Cancelled' (kept for audit).
+    Runs inside the caller's transaction — takes a cursor and does NOT commit.
+    Returns the list of affected bill numbers for the cancellation remark."""
+    cur.execute('''SELECT ibm.bill_id, ibm.bill_number
+        FROM invoice_bill_mapping ibm WHERE ibm.invoice_id = %s''', [invoice_id])
+    bills = [dict(r) for r in cur.fetchall()]
+    for bill in bills:
+        bill_id = bill['bill_id']
+        void_bill_charges(cur, bill_id)  # reverse the parcel ledger (releases billed-lock)
+        cur.execute('UPDATE service_records SET is_billed=0, bill_id=NULL WHERE bill_id=%s', [bill_id])
+        cur.execute("UPDATE bill_header SET bill_status='Cancelled' WHERE id=%s", [bill_id])
+    return [b['bill_number'] for b in bills]

@@ -54,3 +54,31 @@ def test_create_invoice_from_bill(monkeypatch):
         cur.execute("DELETE FROM bill_header WHERE id=%s", [bid])
         cur.execute("DELETE FROM vessel_customers WHERE id=%s", [cid])
         conn.commit(); conn.close()
+
+
+def test_create_invoice_enqueues_sap(monkeypatch):
+    """Creating an invoice queues it for SAP posting (Task 6 wiring).
+    build_invoice_payload is mocked so the enqueue path doesn't depend on SAP config."""
+    import sap_queue, sap_builder
+    monkeypatch.setattr(sap_queue, 'trigger', lambda: None)
+    monkeypatch.setattr(sap_builder, 'build_invoice_payload', lambda h, l: {'mock': True})
+    conn = get_db(); cur = get_cursor(conn)
+    cid, bid = _mk_bill(cur); conn.commit(); conn.close()
+    inv_id = None
+    try:
+        inv_id = finv.create_invoice_record('Customer', cid, [bid], created_by='t')
+        conn = get_db(); cur = get_cursor(conn)
+        cur.execute("SELECT COUNT(*) c FROM sap_outbound_queue WHERE invoice_id=%s", [inv_id])
+        assert cur.fetchone()['c'] == 1
+        conn.close()
+    finally:
+        conn = get_db(); cur = get_cursor(conn)
+        if inv_id:
+            cur.execute("DELETE FROM invoice_lines WHERE invoice_id=%s", [inv_id])
+            cur.execute("DELETE FROM invoice_bill_mapping WHERE invoice_id=%s", [inv_id])
+            cur.execute("DELETE FROM sap_outbound_queue WHERE invoice_id=%s", [inv_id])
+            cur.execute("DELETE FROM invoice_header WHERE id=%s", [inv_id])
+        cur.execute("DELETE FROM bill_lines WHERE bill_id=%s", [bid])
+        cur.execute("DELETE FROM bill_header WHERE id=%s", [bid])
+        cur.execute("DELETE FROM vessel_customers WHERE id=%s", [cid])
+        conn.commit(); conn.close()
