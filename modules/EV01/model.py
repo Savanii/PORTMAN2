@@ -2,8 +2,6 @@ import re
 from datetime import datetime, date
 from decimal import Decimal, InvalidOperation
 
-from rapidfuzz import fuzz
-
 from database import get_db, get_cursor
 
 # Columns a PDF upload is allowed to touch (never id/vcn_id/doc_status/audit cols)
@@ -63,49 +61,6 @@ def _ensure_tank(code, cur):
         cur.execute('INSERT INTO tank_master (tank_code, tank_name, is_active) VALUES (%s, %s, TRUE)', [code, code])
 
 
-def _norm_fuzzy(name):
-    """Normalize for fuzzy compare, dropping parenthetical qualifiers so
-    'FO' and 'FO (e)' collapse to the same key."""
-    return normalize_vessel_name(re.sub(r'\(.*?\)', ' ', name or ''))
-
-
-def _fuzzy_match(name, existing, threshold=90):
-    """True if `name` closely matches any string in `existing` (normalized,
-    word-order-insensitive), so we don't create duplicate masters for the
-    same entity ('ACME OILS' vs 'OILS ACME', 'FO' vs 'FO (e)', minor typos)."""
-    norm = _norm_fuzzy(name)
-    if not norm:
-        return False
-    return any(
-        fuzz.token_sort_ratio(norm, _norm_fuzzy(e)) >= threshold
-        for e in existing if e
-    )
-
-
-def _ensure_consignee(code, cur):
-    code = code.strip()
-    if not code:
-        return
-    cur.execute('SELECT customer_code, name FROM vessel_customers')
-    rows = cur.fetchall()
-    if any(r['customer_code'] == code for r in rows):
-        return
-    if _fuzzy_match(code, [r['name'] for r in rows]):
-        return
-    cur.execute("INSERT INTO vessel_customers (customer_code, name, default_currency) VALUES (%s, %s, 'INR')", [code, code])
-
-
-def _ensure_cargo(name, cur):
-    name = name.strip()
-    if not name:
-        return
-    cur.execute("SELECT cargo_name FROM vessel_cargo")
-    existing = [r['cargo_name'] for r in cur.fetchall()]
-    if name in existing or _fuzzy_match(name, existing):
-        return
-    cur.execute("INSERT INTO vessel_cargo (cargo_name, cargo_type, cargo_category) VALUES (%s, '', '')", [name])
-
-
 def _vessel_display_name(name):
     """PDF name without status tags: 'SWARNA PUSHP [PR]' → 'SWARNA PUSHP'."""
     return ' '.join(re.sub(r'\[.*?\]', ' ', name or '').split())
@@ -150,14 +105,13 @@ def _ensure_vessel(vessel_name, loa, cur, username):
 
 
 def _ensure_masters(row, cur):
+    # Deliberately does NOT touch vessel_customers (VCUM01) or vessel_cargo
+    # (VCG01) — auto-creating masters from parsed PDF text produced bogus
+    # entries. Those masters are maintained only through their own screens.
     for code in (row.get('agents') or '').split(','):
         _ensure_agent(code, cur)
     for code in (row.get('tanks') or '').split(','):
         _ensure_tank(code, cur)
-    for code in (row.get('consignees') or '').split(','):
-        _ensure_consignee(code, cur)
-    for name in (row.get('cargo_name') or '').split(','):
-        _ensure_cargo(name, cur)
 
 
 def _find_match(row, by_via, by_name):
