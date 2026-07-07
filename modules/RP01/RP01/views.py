@@ -1,7 +1,6 @@
 from flask import render_template, session, redirect, url_for, request, jsonify, Response
 from functools import wraps
 import csv, io
-from datetime import datetime
 from . import bp
 from database import get_db, get_cursor, get_user_permissions
 
@@ -47,8 +46,6 @@ MIS_COLUMNS = [
     ('Sub Category',                       'sub_category'),
     ('Cargo Class',                        'cargo_class'),
     ('Cargo Name',                         'cargo_name'),
-    ('Operation Start (DD-MM-YYYY HH:MM)', 'operation_start'),
-    ('Operation End (DD-MM-YYYY HH:MM)',   'operation_end'),
     ('Terminal',                           'terminal'),
     ('Quantity MT',                        'quantity'),
     ('Overseas/Coastal',                   'overseas_coastal'),
@@ -70,14 +67,9 @@ DB_COLS = [c for _, c in MIS_COLUMNS]
 
 # Vessel-level cells: filled on the first row of a vessel group in the legacy
 # sheet, blank on continuation rows — inherit from the row above on ingest.
-FFILL_COLS = {'fin_year', 'month_jsw', 'month_jnpt', 'vcn_no', 'vessel_name',
-              'operation_start', 'operation_end'}
-DT_COLS = {'operation_start', 'operation_end'}
+FFILL_COLS = {'fin_year', 'month_jsw', 'month_jnpt', 'vcn_no', 'vessel_name'}
 NUM_COLS = {'quantity', 'cargo_rate', 'cargo_amount', 'infra_rate', 'infra_amount',
             'toll_rate', 'toll_amount', 'gangway_amount', 'mla_rate', 'mla_amount'}
-
-_DT_FORMATS = ('%d-%m-%Y %H:%M', '%d/%m/%Y %H:%M', '%d/%m/%y %H:%M', '%d-%m-%y %H:%M',
-               '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M', '%d-%m-%Y', '%d/%m/%Y', '%d/%m/%y')
 
 
 def _clean(val):
@@ -94,18 +86,6 @@ def _num(val):
         return float(val)
     except ValueError:
         raise ValueError(f'not a number: {val!r}')
-
-
-def _dt(val):
-    val = _clean(val)
-    if not val:
-        return None
-    for fmt in _DT_FORMATS:
-        try:
-            return datetime.strptime(val, fmt).strftime('%Y-%m-%dT%H:%M')
-        except ValueError:
-            pass
-    raise ValueError(f'bad date: {val!r} (use DD-MM-YYYY HH:MM)')
 
 
 def parse_mis_csv(text):
@@ -140,12 +120,7 @@ def parse_mis_csv(text):
         row = {}
         for col in DB_COLS:
             try:
-                if col in DT_COLS:
-                    row[col] = _dt(raw[col])
-                elif col in NUM_COLS:
-                    row[col] = _num(raw[col])
-                else:
-                    row[col] = raw[col] or None
+                row[col] = _num(raw[col]) if col in NUM_COLS else (raw[col] or None)
             except ValueError as e:
                 errors.append(f'Row {line_no} [{col}]: {e}')
         if not row.get('vcn_no') or not row.get('vessel_name'):

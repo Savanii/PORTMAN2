@@ -32,8 +32,6 @@ def upgrade() -> None:
             sub_category     TEXT,           -- Category1
             cargo_class      TEXT,           -- 'Cargo'  (Edible Oil / Other Liquid / Ph.Acid / POL)
             cargo_name       TEXT,           -- 'Cargo1' (CPO, CDSBO, Acetic Acid, ...)
-            operation_start  TEXT,           -- ISO 'YYYY-MM-DDTHH:MM' (project convention)
-            operation_end    TEXT,
             terminal         TEXT,
             quantity         NUMERIC(14,3),
             overseas_coastal TEXT,

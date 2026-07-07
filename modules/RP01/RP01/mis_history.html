@@ -84,9 +84,9 @@
     <h3><span class="step-no">2</span>Fill in the data</h3>
     <ul style="padding-left:18px;margin:4px 0;">
         <li><b>Do not include monthly subtotal or grand-total rows</b> — reports compute totals. Any row without a Customer is ignored.</li>
-        <li>Vessel-level cells (Fin Year, Months, VCN No, Vessel Name, Operation Start/End) may be left blank on a vessel's continuation rows — they inherit from the row above, like the existing sheet.</li>
+        <li>Vessel-level cells (Fin Year, Months, VCN No, Vessel Name) may be left blank on a vessel's continuation rows — they inherit from the row above, like the existing sheet.</li>
         <li>Fill Gangway Agent / Gangway Amount only on the <b>first row of each vessel</b>, so vessel-level charges are not double counted.</li>
-        <li>Dates: <code>DD-MM-YYYY HH:MM</code> (the old sheet's <code>DD/MM/YY HH:MM</code> is also accepted). Numbers may include commas; <code>#N/A</code> is treated as blank.</li>
+        <li>Numbers may include commas; <code>#N/A</code> is treated as blank.</li>
     </ul>
 </div>
 
@@ -135,8 +135,6 @@ const misTable = new Tabulator('#misTable', {
         {title: 'Cargo', field: 'cargo_name', width: 140},
         {title: 'Terminal', field: 'terminal', width: 90},
         {title: 'Qty (MT)', field: 'quantity', hozAlign: 'right', width: 100},
-        {title: 'Op Start', field: 'operation_start', width: 130, formatter: datetimeCellFormatter},
-        {title: 'Op End', field: 'operation_end', width: 130, formatter: datetimeCellFormatter},
         {title: 'Cargo Amt', field: 'cargo_amount', hozAlign: 'right', width: 110},
         {title: 'Infra Amt', field: 'infra_amount', hozAlign: 'right', width: 100},
         {title: 'Toll Amt', field: 'toll_amount', hozAlign: 'right', width: 100},
