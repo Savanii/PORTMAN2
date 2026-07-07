@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Historical MIS Data — RP01{% endblock %}
+{% block title %}Vessel Call Master — RP01{% endblock %}
 
 {% block head %}
 <style>
@@ -69,102 +69,104 @@
 
 {% block content %}
 <div class="module-header" style="display:flex;align-items:center;gap:12px;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid var(--border-color);">
-    <h2 style="margin:0;font-size:20px;color:var(--text-primary);">Historical MIS Data</h2>
+    <h2 style="margin:0;font-size:20px;color:var(--text-primary);">Vessel Call Master</h2>
     <span style="background:#4a90d9;color:#fff;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px;">RP01</span>
     <a href="/module/RP01/" style="margin-left:auto;font-size:12px;color:#4a90d9;">&larr; Back to Reports</a>
 </div>
 
 <div class="mis-step">
     <h3><span class="step-no">1</span>Download the template</h3>
-    <p>One row per customer / cargo line — the same shape as the existing MIS sheet, without the charge-group merged headers.</p>
-    <a class="mis-btn" href="/api/module/RP01/mis-history/template">Download CSV Template</a>
+    <p>One row per vessel call — vessel particulars, berthing timings (NOR &rarr; Pilot Disembarked), quantity and turnaround KPIs. The legacy sheet's SN, Code/Status, daily-update tracking fields and formula helper columns are not part of the template.</p>
+    <a class="mis-btn" href="/api/module/RP01/vessel-master/template">Download CSV Template</a>
 </div>
 
 <div class="mis-step">
     <h3><span class="step-no">2</span>Fill in the data</h3>
     <ul style="padding-left:18px;margin:4px 0;">
         <li>The template's <b>second row shows the expected format for each column</b> — keep it or delete it, it is ignored on upload.</li>
-        <li><b>Do not include monthly subtotal or grand-total rows</b> — reports compute totals. Any row without a Customer is ignored.</li>
-        <li>Vessel-level cells (Fin Year, Months, VCN No, Vessel Name) may be left blank on a vessel's continuation rows — they inherit from the row above, like the existing sheet.</li>
-        <li>Fill Gangway Agent / Gangway Amount only on the <b>first row of each vessel</b>, so vessel-level charges are not double counted.</li>
-        <li>Numbers may include commas; <code>#N/A</code> is treated as blank.</li>
+        <li>One complete row per vessel call. <b>Do not include total rows</b> — any row without a Vessel Name is ignored.</li>
+        <li>All timings: <code>DD-MM-YYYY HH:MM</code> (e.g. <code>25-12-2024 07:48</code>). A dash (<code>-</code>), blank or <code>#N/A</code>/<code>#DIV/0!</code> is treated as empty.</li>
+        <li>KPI columns (waiting / working / movement times) are in days, as in the existing sheet. Numbers may include commas.</li>
     </ul>
 </div>
 
 <div class="mis-step">
     <h3><span class="step-no">3</span>Upload &amp; replace</h3>
-    <p style="color:#c62828;"><b>This deletes ALL existing MIS history rows and inserts the file contents.</b> Nothing is changed if the file has errors.</p>
+    <p style="color:#c62828;"><b>This deletes ALL existing vessel call master rows and inserts the file contents.</b> Nothing is changed if the file has errors.</p>
     <input type="file" id="misFile" accept=".csv" style="font-size:12px;">
-    <button class="mis-btn danger" id="uploadBtn" onclick="uploadMis()" {% if not (permissions.can_add and permissions.can_delete) %}disabled title="Requires add + delete permission"{% endif %}>Replace Data</button>
+    <button class="mis-btn danger" id="uploadBtn" onclick="uploadVm()" {% if not (permissions.can_add and permissions.can_delete) %}disabled title="Requires add + delete permission"{% endif %}>Replace Data</button>
     <div id="uploadResult"></div>
 </div>
 
 <div class="mis-summary" id="summary"></div>
 
-<div id="misTable"></div>
+<div id="vmTable"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 function loadSummary() {
-    fetch('/api/module/RP01/mis-history/summary').then(r => r.json()).then(s => {
+    fetch('/api/module/RP01/vessel-master/summary').then(r => r.json()).then(s => {
         const fmt = n => Number(n).toLocaleString('en-IN');
         document.getElementById('summary').innerHTML = `
-            <div class="mis-chip"><div class="val">${fmt(s.total_rows)}</div><div class="lbl">Rows</div></div>
-            <div class="mis-chip"><div class="val">${fmt(s.vessels)}</div><div class="lbl">Vessel Calls</div></div>
+            <div class="mis-chip"><div class="val">${fmt(s.total_rows)}</div><div class="lbl">Vessel Calls</div></div>
             <div class="mis-chip"><div class="val">${fmt(Math.round(s.quantity))}</div><div class="lbl">Quantity (MT)</div></div>
-            <div class="mis-chip"><div class="val">&#8377;${fmt(Math.round(s.amount))}</div><div class="lbl">Total Charges</div></div>
+            <div class="mis-chip"><div class="val">${s.avg_pre_berthing ?? '—'}</div><div class="lbl">Avg Pre-Berthing (days)</div></div>
             <div class="mis-chip"><div class="val">${s.fin_years || '—'}</div><div class="lbl">Fin Years</div></div>
             <div class="mis-chip"><div class="val" style="font-size:12px;">${s.uploaded_at ? formatDateTime(s.uploaded_at) + '<br>' + (s.uploaded_by || '') : '—'}</div><div class="lbl">Last Upload</div></div>`;
     });
 }
 
-const misTable = new Tabulator('#misTable', {
+const vmTable = new Tabulator('#vmTable', {
     layout: 'fitDataFill',
     height: '480px',
     pagination: true,
     paginationMode: 'remote',
     paginationSize: 25,
-    ajaxURL: '/api/module/RP01/mis-history/data',
-    placeholder: 'No MIS data uploaded yet',
+    ajaxURL: '/api/module/RP01/vessel-master/data',
+    placeholder: 'No vessel call data uploaded yet',
     columns: [
         {title: 'FY', field: 'fin_year', width: 80, frozen: true},
-        {title: 'Month', field: 'month_jnpt', width: 80, frozen: true},
+        {title: 'Month', field: 'month', width: 80, frozen: true},
         {title: 'VCN', field: 'vcn_no', width: 80, frozen: true},
         {title: 'Vessel', field: 'vessel_name', width: 160},
-        {title: 'Customer', field: 'customer', width: 200},
-        {title: 'Cargo', field: 'cargo_name', width: 140},
-        {title: 'Terminal', field: 'terminal', width: 90},
+        {title: 'Berth', field: 'berth_no', width: 70},
+        {title: 'IMO', field: 'imo_no', width: 90},
+        {title: 'Flag', field: 'flag', width: 100},
+        {title: 'Load Port', field: 'port_of_loading', width: 150},
+        {title: 'Cargo', field: 'cargo', width: 140},
         {title: 'Qty (MT)', field: 'quantity', hozAlign: 'right', width: 100},
-        {title: 'Cargo Amt', field: 'cargo_amount', hozAlign: 'right', width: 110},
-        {title: 'Infra Amt', field: 'infra_amount', hozAlign: 'right', width: 100},
-        {title: 'Toll Amt', field: 'toll_amount', hozAlign: 'right', width: 100},
-        {title: 'Gangway', field: 'gangway_amount', hozAlign: 'right', width: 90},
-        {title: 'MLA Amt', field: 'mla_amount', hozAlign: 'right', width: 90},
-        {title: 'Imp/Exp', field: 'import_export', width: 80},
-        {title: 'Importer', field: 'importer', width: 200},
-        {title: 'Remarks', field: 'remarks', width: 160},
+        {title: 'NOR', field: 'nor', width: 130, formatter: datetimeCellFormatter},
+        {title: 'Alongside', field: 'alongside', width: 130, formatter: datetimeCellFormatter},
+        {title: 'Ops Comm.', field: 'ops_commenced', width: 130, formatter: datetimeCellFormatter},
+        {title: 'Cargo Compl.', field: 'cargo_completion', width: 130, formatter: datetimeCellFormatter},
+        {title: 'Cast Off', field: 'cast_off', width: 130, formatter: datetimeCellFormatter},
+        {title: 'Flow (MT/hr)', field: 'flow_rate', hozAlign: 'right', width: 100},
+        {title: 'Stay (d)', field: 'stay_at_berth', hozAlign: 'right', width: 80},
+        {title: 'Working (d)', field: 'working_time', hozAlign: 'right', width: 90},
+        {title: 'Agent', field: 'agent', width: 160},
+        {title: 'Remarks', field: 'remarks', width: 200},
     ],
 });
 
-function uploadMis() {
+function uploadVm() {
     const file = document.getElementById('misFile').files[0];
     const out = document.getElementById('uploadResult');
     if (!file) { out.className = 'err'; out.textContent = 'Choose a CSV file first.'; return; }
-    if (!confirm('This will DELETE all existing MIS history data and replace it with this file. Continue?')) return;
+    if (!confirm('This will DELETE all existing vessel call master data and replace it with this file. Continue?')) return;
     const btn = document.getElementById('uploadBtn');
     btn.disabled = true;
     out.className = ''; out.textContent = 'Uploading…';
     const fd = new FormData();
     fd.append('file', file);
-    fetch('/api/module/RP01/mis-history/upload', {method: 'POST', body: fd})
+    fetch('/api/module/RP01/vessel-master/upload', {method: 'POST', body: fd})
         .then(r => r.json().then(j => ({ok: r.ok, j})))
         .then(({ok, j}) => {
             if (ok) {
                 out.className = 'ok';
                 out.textContent = `Done — deleted ${j.deleted} old rows, inserted ${j.inserted} rows.`;
                 loadSummary();
-                misTable.setData();
+                vmTable.setData();
             } else {
                 out.className = 'err';
                 out.textContent = (j.error || 'Upload failed') + '\n' + (j.details || []).join('\n')
