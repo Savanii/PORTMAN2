@@ -563,7 +563,7 @@ def get_approval_eligibility(vcn_id):
     else:
         required = [('cargo_name', 'Cargo'), ('quantity', 'Qty'),
                     ('consigner_name', 'Consignee'), ('importer_name', 'Payment by'),
-                    ('pipeline_name', 'Pipeline'), ('unload_terminal', 'Unload Terminal')]
+                    ('pipeline_name', 'Pipeline'), ('unload_terminal', 'Terminal')]
         bad = []
         for p in parcels:
             gaps = [label for field, label in required

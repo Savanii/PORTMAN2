@@ -817,8 +817,14 @@
                 editorParams: function() { return {values: berthNames, autocomplete: true, allowEmpty: true, listOnEmpty: true}; }},
             {title: "Vessel Agent", field: "vessel_agent_name", editor: canEdit ? "list" : false,
                 editorParams: {values: vesselAgents, autocomplete: true, allowEmpty: true}, width: 120},
-            {title: "Discharge Type", field: "type_of_discharge", editor: canEdit ? "list" : false,
-                editorParams: {values: {"Full Discharge": "Full Discharge", "Partial Discharge": "Partial Discharge"}, autocomplete: false, allowEmpty: true}, width: 130},
+            {title: "Discharge/Load Type", field: "type_of_discharge", editor: canEdit ? "list" : false,
+                // one grid holds both operations — dropdown wording follows the row's type
+                editorParams: function(cell) {
+                    const vals = cell.getRow().getData().operation_type === 'Export'
+                        ? {"Full Load": "Full Load", "Partial Load": "Partial Load"}
+                        : {"Full Discharge": "Full Discharge", "Partial Discharge": "Partial Discharge"};
+                    return {values: vals, autocomplete: false, allowEmpty: true};
+                }, width: 130},
             {title: "Load Port", field: "load_port", editor: canEdit ? "list" : false,
                 editorParams: {values: portOptions, autocomplete: true, allowEmpty: true}, width: 110},
             {title: "Discharge Port", field: "discharge_port", editor: canEdit ? "list" : false,
@@ -1140,7 +1146,7 @@
                         row.update({unload_terminal: kept.join(', ')});
                     }
                 },
-                {title: "Unload Terminal", field: "unload_terminal", widthGrow: 1.2,
+                {title: "Terminal", field: "unload_terminal", widthGrow: 1.2,
                     formatter: function(cell) {
                         if (!_splitMulti(cell.getRow().getData().pipeline_name).length)
                             return '<span style="color:#cbd5e1;font-style:italic;">select pipeline first</span>';
@@ -1269,7 +1275,7 @@
                             row.update({unload_terminal: kept.join(', ')});
                         }
                     },
-                    {title: "Unload Terminal", field: "unload_terminal", widthGrow: 1.2,
+                    {title: "Terminal", field: "unload_terminal", widthGrow: 1.2,
                         formatter: function(cell) {
                             if (!_splitMulti(cell.getRow().getData().pipeline_name).length)
                                 return '<span style="color:#cbd5e1;font-style:italic;">select pipeline first</span>';
