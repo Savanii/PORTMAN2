@@ -419,14 +419,21 @@
           row.getElement().title = 'Short-close: leftover quantity written off (excluded from Avg rate). Use “Revert Short-close” to undo.';
         }
       },
-      // rAF: dataLoaded fires before rows render; defer scroll until they exist
-      dataLoaded: function() { recomputeTotals(pid); requestAnimationFrame(() => scrollToLatest(pid)); }
+      dataLoaded: function() { recomputeTotals(pid); }
+    });
+    // open scrolled to the latest (bottom) entry: wait for the first render
+    // that actually has rows — dataLoaded fires before rows hit the DOM.
+    const t = subTables[pid];
+    t.on('renderComplete', function once() {
+      if (!t.getRows().length) return;
+      t.off('renderComplete', once);
+      scrollToLatest(pid);
     });
   }
 
   function scrollToLatest(pid) {
-    const rows = subTables[pid] ? subTables[pid].getRows() : [];
-    if (rows.length) rows[rows.length - 1].scrollTo().catch(() => {});
+    const holder = document.querySelector(`#log-table-${pid} .tabulator-tableholder`);
+    if (holder) holder.scrollTop = holder.scrollHeight;
   }
 
   function currentShift() { const h = new Date().getHours(); return h >= 6 && h < 14 ? 'A' : h >= 14 && h < 22 ? 'B' : 'C'; }
