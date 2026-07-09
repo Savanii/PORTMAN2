@@ -367,7 +367,12 @@
 
   function logColumns() {
     return [
-      {title: "Date", field: "entry_date", editor: canEdit ? "input" : false, width: 96},
+      // value stays ISO (yyyy-mm-dd) for chaining/validation; display is DD-MM-YYYY
+      {title: "Date", field: "entry_date", editor: canEdit ? "date" : false, width: 96,
+        formatter: function(cell) {
+          const m = String(cell.getValue() || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+          return m ? `${m[3]}-${m[2]}-${m[1]}` : (cell.getValue() || '');
+        }},
       {title: "From", field: "from_time", editor: canEdit ? "input" : false, width: 60, cellEdited: validateTimeCell},
       {title: "To", field: "to_time", editor: canEdit ? "input" : false, width: 60, cellEdited: validateTimeCell},
       {title: "Last Hr", field: "quantity", editor: canEdit ? "number" : false, hozAlign: "right", width: 70,
