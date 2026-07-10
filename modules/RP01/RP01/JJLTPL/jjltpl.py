@@ -114,7 +114,19 @@ def _jjltpl_fy_bulk_tons(cur, fin_year):
     }
 
 
-from datetime import timedelta
+def _jjltpl_fy_bulk_vessel_count(cur, fin_year):
+    """
+    Count of vessels in mis_vessel_master for the given financial year.
+    """
+    cur.execute("""
+        SELECT COUNT(*) AS cnt
+        FROM mis_vessel_master
+        WHERE fin_year = %s
+    """, (fin_year,))
+
+    row = cur.fetchone()
+    return row["cnt"] if row and row["cnt"] else 0
+
 
 def _jjltpl_vessels_on_berth(cur, window_start, window_end, berths):
 
@@ -255,12 +267,10 @@ def _jjltpl_bulk_tons(cur, period_start, period_end):
     cur.execute("""
         SELECT
             COALESCE(SUM(quantity), 0) AS qty
-        FROM lueu_parcel_log
-        WHERE is_deleted IS NOT TRUE
-          AND NULLIF(TRIM(entry_date), '') IS NOT NULL
-          AND NULLIF(TRIM(from_time), '') IS NOT NULL
-          AND (entry_date || ' ' || from_time)::timestamp >= %s
-          AND (entry_date || ' ' || from_time)::timestamp < %s
+        FROM mis_vessel_master
+        WHERE NULLIF(TRIM(cast_off), '') IS NOT NULL
+          AND NULLIF(TRIM(cast_off), '')::timestamp >= %s
+          AND NULLIF(TRIM(cast_off), '')::timestamp < %s
     """, (period_start, period_end))
 
     row = cur.fetchone()
@@ -273,6 +283,38 @@ def _jjltpl_bulk_tons(cur, period_start, period_end):
         MEDIUM_LIQUID_BULK: qty,
         "bulk_total": qty,
     }
+
+
+def _jjltpl_month_bulk_tons(cur, period_start, period_end, berths):
+    """
+    MONTH quantity, based on vessels whose cast_off_datetime (in
+    ldud_header) falls within the period — not entry-time logs.
+    """
+    cur.execute("""
+        SELECT
+            COALESCE(SUM(po.quantity), 0) AS qty
+        FROM ldud_header lh
+        JOIN vcn_header vh
+            ON vh.id = lh.vcn_id
+        LEFT JOIN ldud_parcel_ops po
+            ON po.ldud_id = lh.id
+        WHERE vh.berth_name = ANY(%s)
+          AND NULLIF(lh.cast_off_datetime, '') IS NOT NULL
+          AND NULLIF(lh.cast_off_datetime, '')::timestamp >= %s
+          AND NULLIF(lh.cast_off_datetime, '')::timestamp < %s
+    """, (berths, period_start, period_end))
+
+    row = cur.fetchone()
+
+    qty = float(row["qty"] or 0)
+
+    return {
+        MEDIUM_DRY_BULK: 0.0,
+        MEDIUM_BREAK_BULK: 0.0,
+        MEDIUM_LIQUID_BULK: qty,
+        "bulk_total": qty,
+    }
+
 
 def _jjltpl_bulk_vessel_count(cur, period_start, period_end, berths):
 
@@ -295,15 +337,23 @@ def _jjltpl_period_row(cur, label, period_start, period_end, terminal, berths, f
 
     if label == "YEAR":
         tons = _jjltpl_fy_bulk_tons(cur, fin_year)
+        vessel_count = _jjltpl_fy_bulk_vessel_count(cur, fin_year)
+    elif label == "MONTH":
+        tons = _jjltpl_month_bulk_tons(cur, period_start, period_end, berths)
+        vessel_count = _jjltpl_bulk_vessel_count(
+            cur,
+            period_start,
+            period_end,
+            berths
+        )
     else:
         tons = _jjltpl_bulk_tons(cur, period_start, period_end)
-
-    vessel_count = _jjltpl_bulk_vessel_count(
-        cur,
-        period_start,
-        period_end,
-        berths
-    )
+        vessel_count = _jjltpl_bulk_vessel_count(
+            cur,
+            period_start,
+            period_end,
+            berths
+        )
 
     return {
         "period": label,
