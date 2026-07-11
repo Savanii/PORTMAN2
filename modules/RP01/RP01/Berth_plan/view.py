@@ -165,7 +165,8 @@ def _enrich_vessel(cur, vcn_id, ldud_id, window_start, window_end):
         JOIN ldud_parcel_ops po ON po.id = l.parcel_op_id
         WHERE po.ldud_id = %s
           AND l.is_deleted IS NOT TRUE
-          AND (l.entry_date::timestamp + COALESCE(l.from_time::time, '00:00'::time))
+          AND (NULLIF(l.entry_date, '')::timestamp
+               + COALESCE(NULLIF(l.from_time, '')::time, '00:00'::time))
               BETWEEN %s AND %s
     ''', [ldud_id, window_start, window_end])
     last_24hr_qty = round(float(cur.fetchone()['q'] or 0), 3)
@@ -240,9 +241,7 @@ def _base_row(h):
     }
 
 
-def get_berthed_vessels(window_start, window_end, berths):
-    conn = get_db()
-    cur = get_cursor(conn)
+
 def get_berthed_vessels(window_start, window_end, berths):
     conn = get_db()
     cur = get_cursor(conn)
