@@ -670,7 +670,7 @@
     // (no constraint) so it's excluded from the chain on both sides.
     const SOF_ORDER = ['anchored_datetime', 'nor_tendered', 'nor_accepted', 'pilot_pickup_time',
                        'first_line', 'alongside_datetime', 'agent_stevedore_onboard',
-                       'cast_off_datetime', 'pilot_board_departure', 'pilot_disembarked'];
+                       'pilot_board_departure', 'cast_off_datetime', 'pilot_disembarked'];
     function _sofDt(v) {
         if (!v) return null;
         const d = new Date(String(v).replace(' ', 'T'));
@@ -779,9 +779,9 @@
                 formatter: datetimeCellFormatter, cellEdited: validateSofOrder},
             {title: "Agent/Custom/Stevedore On Board", field: "agent_stevedore_onboard", editor: canEdit ? datetimeEditor : false, width: 200,
                 formatter: datetimeCellFormatter, cellEdited: validateSofOrder},
-            {title: "Cast Off Date/Time", field: "cast_off_datetime", editor: canEdit ? datetimeEditor : false, width: 160,
-                formatter: datetimeCellFormatter, cellEdited: validateSofOrder},
             {title: "Pilot Board Departure", field: "pilot_board_departure", editor: canEdit ? datetimeEditor : false, width: 160,
+                formatter: datetimeCellFormatter, cellEdited: validateSofOrder},
+            {title: "Cast Off Date/Time", field: "cast_off_datetime", editor: canEdit ? datetimeEditor : false, width: 160,
                 formatter: datetimeCellFormatter, cellEdited: validateSofOrder},
             {title: "Pilot Disembarked", field: "pilot_disembarked", editor: canEdit ? datetimeEditor : false, width: 160,
                 formatter: datetimeCellFormatter, cellEdited: validateSofOrder},
