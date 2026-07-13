@@ -571,7 +571,7 @@ def get_approval_eligibility(vcn_id):
     conn = get_db()
     cur = get_cursor(conn)
     cur.execute('''SELECT operation_type, vessel_name, vessel_agent_name,
-                          cargo_type, discharge_port
+                          cargo_type, discharge_port, via_number, berth_name, vessel_run_type
                    FROM vcn_header WHERE id=%s''', (vcn_id,))
     header = cur.fetchone()
     if not header:
@@ -585,6 +585,12 @@ def get_approval_eligibility(vcn_id):
         missing.append('Vessel Name')
     if not header['vessel_agent_name']:
         missing.append('Agent Name')
+    if not header['via_number']:
+        missing.append('VIA No.')
+    if not header['berth_name']:
+        missing.append('Berth')
+    if not header['vessel_run_type']:
+        missing.append('Vessel Run Type')
     if not header['discharge_port']:
         missing.append('Discharge Port')
 

@@ -46,6 +46,21 @@ def save_data(data):
     conn.close()
     return row_id
 
+def bulk_insert(rows):
+    # ponytail: CSV upload never sets is_default_discharge — that stays a single-row radio in the grid
+    conn = get_db()
+    cur = get_cursor(conn)
+    inserted = 0
+    for row in rows:
+        if not row.get('name'):
+            continue
+        cur.execute(f"INSERT INTO {TABLE} (name, port_code, is_default_discharge) VALUES (%s, %s, FALSE)",
+                    [row['name'], row.get('port_code') or None])
+        inserted += 1
+    conn.commit()
+    conn.close()
+    return inserted
+
 def delete_data(row_id):
     conn = get_db()
     cur = get_cursor(conn)

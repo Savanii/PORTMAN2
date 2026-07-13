@@ -456,7 +456,7 @@
     let cargoTypes = [];
     let docSeries = [];
     let defaultDocSeries = '';
-    let dischargeTypes = ['Full Discharge', 'Partial Discharge'];
+    let runTypes = [];   // VRT01 Vessel Run Type Master
     let delayTypes = [];
     let cargoNames = [];
     let quantityUoms = [];
@@ -693,7 +693,7 @@
     }
 
     async function loadMasterData() {
-        const [vesselsRes, agentsRes, custRes, cargoRes, dsRes, dmRes, cnRes, uomRes, portRes, plRes, trRes, berthRes, configRes] = await Promise.all([
+        const [vesselsRes, agentsRes, custRes, cargoRes, dsRes, dmRes, cnRes, uomRes, portRes, plRes, trRes, berthRes, runTypeRes, configRes] = await Promise.all([
             fetch('/api/module/VCN01/vessels'),
             fetch('/api/module/VAM01/all'),
             fetch('/api/module/VCUM01/all'),
@@ -706,6 +706,7 @@
             fetch('/api/module/PLM01/all'),
             fetch('/api/module/TRM01/all'),
             fetch('/api/module/PBM01/all'),
+            fetch('/api/module/VRT01/all'),
             fetch('/admin/api/config/VCN01')
         ]);
         vessels = await vesselsRes.json();
@@ -744,6 +745,7 @@
         const defPort = portNames.find(p => p && typeof p === 'object' && p.is_default_discharge);
         defaultDischargePort = defPort ? defPort.name : '';
         berthNames = await berthRes.json();
+        runTypes = await runTypeRes.json();
         moduleConfig = await configRes.json();
         initFilterConfig();
         initTable();
@@ -817,14 +819,8 @@
                 editorParams: function() { return {values: berthNames, autocomplete: true, allowEmpty: true, listOnEmpty: true}; }},
             {title: "Vessel Agent", field: "vessel_agent_name", editor: canEdit ? "list" : false,
                 editorParams: {values: vesselAgents, autocomplete: true, allowEmpty: true}, width: 120},
-            {title: "Discharge/Load Type", field: "type_of_discharge", editor: canEdit ? "list" : false,
-                // one grid holds both operations — dropdown wording follows the row's type
-                editorParams: function(cell) {
-                    const vals = cell.getRow().getData().operation_type === 'Export'
-                        ? {"Full Load": "Full Load", "Partial Load": "Partial Load"}
-                        : {"Full Discharge": "Full Discharge", "Partial Discharge": "Partial Discharge"};
-                    return {values: vals, autocomplete: false, allowEmpty: true};
-                }, width: 130},
+            {title: "Vessel Run Type", field: "vessel_run_type", editor: canEdit ? "list" : false,
+                editorParams: function() { return {values: runTypes, autocomplete: true, allowEmpty: true, listOnEmpty: true}; }, width: 130},
             {title: "Load Port", field: "load_port", editor: canEdit ? "list" : false,
                 editorParams: {values: portOptions, autocomplete: true, allowEmpty: true}, width: 110},
             {title: "Discharge Port", field: "discharge_port", editor: canEdit ? "list" : false,
@@ -1438,7 +1434,6 @@
             doc_date: getTodayDate(),
             doc_status: 'Draft',
             vcn_doc_series: defaultDocSeries,
-            type_of_discharge: 'Full Discharge',
             discharge_port: defaultDischargePort
         }, true);
     }

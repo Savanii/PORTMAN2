@@ -607,11 +607,12 @@ def is_vcn_billed(vcn_id):
     return billed
 
 
-def generate_bill(data, created_by, bill_status):
+def generate_bill(data, created_by, bill_status, approved_by=None):
     """Create ONE bill across the selected vessels. Reuses save_bill_header
     (numbering) and save_bill_line (GST/TDS calc, mutates the line dict with the
     computed amounts), then records totals, bill_vessels, and the parcel ledger.
-    Returns (bill_id, bill_number). No MBC — only VCN_IMPORT/VCN_EXPORT lines."""
+    Returns (bill_id, bill_number). No MBC — only VCN_IMPORT/VCN_EXPORT lines.
+    Pass approved_by when the bill is born Approved (password-confirmed)."""
     lines = data.get('lines') or []
     if not lines:
         raise ValueError('No lines to bill')
@@ -642,6 +643,9 @@ def generate_bill(data, created_by, bill_status):
         'created_by': created_by,
         'created_date': datetime.now().strftime('%Y-%m-%d'),
     }
+    if approved_by:
+        header['approved_by'] = approved_by
+        header['approved_date'] = datetime.now().strftime('%Y-%m-%d')
     bill_id, bill_number = save_bill_header(header)
 
     subtotal = cgst = sgst = igst = 0.0
@@ -694,10 +698,75 @@ def _to_float(v):
         return 0.0
 
 
+def _actual_qty_map(cur, ldud_id, declared_by_parcel):
+    """Actual handled quantity per parcel id for one LDUD, from the LUEU01
+    logbook (short-close rows excluded — that quantity was never handled).
+    Merged ops (one op covering several same-cargo parcels) are apportioned
+    pro-rata by declared parcel quantity. Parcels not covered by any op are
+    absent from the map (caller falls back to the declared quantity)."""
+    cur.execute('''SELECT po.parcel_ids, COALESCE(SUM(lg.quantity), 0) AS q
+                   FROM ldud_parcel_ops po
+                   LEFT JOIN lueu_parcel_log lg
+                          ON lg.parcel_op_id = po.id
+                         AND COALESCE(lg.is_deleted, FALSE) = FALSE
+                         AND COALESCE(lg.is_shortclose, FALSE) = FALSE
+                   WHERE po.ldud_id = %s
+                   GROUP BY po.id, po.parcel_ids''', [ldud_id])
+    actual = {}
+    for r in cur.fetchall():
+        ids = [int(x) for x in str(r['parcel_ids'] or '').split(',') if str(x).strip().isdigit()]
+        if not ids:
+            continue
+        q = float(r['q'] or 0)
+        weights = [max(_to_float(declared_by_parcel.get(pid)), 0.0) for pid in ids]
+        wsum = sum(weights)
+        for pid, w in zip(ids, weights):
+            # ponytail: pro-rata by declared qty; equal split when nothing declared
+            share = q * (w / wsum) if wsum > 0 else q / len(ids)
+            actual[pid] = actual.get(pid, 0.0) + share
+    return actual
+
+
+def unclosed_vcn_docs(vcn_ids):
+    """VCN doc nums whose latest LDUD is NOT Closed/Partial Close (incl. no
+    LDUD at all) — these may only get a pro forma, never an actual bill."""
+    if not vcn_ids:
+        return []
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('''
+        SELECT h.vcn_doc_num
+        FROM vcn_header h
+        LEFT JOIN (SELECT DISTINCT ON (vcn_id) vcn_id, doc_status
+                   FROM ldud_header ORDER BY vcn_id, id DESC) ll ON ll.vcn_id = h.id
+        WHERE h.id = ANY(%s)
+          AND (ll.doc_status IS NULL OR NOT (ll.doc_status = ANY(%s)))
+    ''', [list(vcn_ids), list(_CARGO_GATE)])
+    docs = [r['vcn_doc_num'] for r in cur.fetchall()]
+    conn.close()
+    return docs
+
+
+def verify_user_password(user_id, password):
+    """Re-authenticate the logged-in user (same plaintext check as login)."""
+    if not password:
+        return False
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('SELECT 1 AS ok FROM users WHERE id=%s AND password=%s', [user_id, password])
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
 def get_customer_billables(customer_type, customer_id):
     """Billable charges for a customer's parcels, grouped by vessel. Read-only.
-    Bills the payer (importer_name); only parcels whose VCN's latest LDUD is
-    Closed/Partial Close; remaining per charge from the parcel_charge_billed ledger."""
+    Bills the payer (importer_name). Two stages per vessel:
+      'proforma' — VCN Approved but LDUD not yet Closed: declared quantities,
+                   pro forma invoice only (no bill generation);
+      'actual'   — latest LDUD Closed/Partial Close: quantities come from the
+                   LUEU01 logbook (fallback to declared when no logbook data).
+    Remaining per charge comes from the parcel_charge_billed ledger."""
     conn = get_db()
     cur = get_cursor(conn)
 
@@ -716,33 +785,56 @@ def get_customer_billables(customer_type, customer_id):
 
     cur.execute("""
         WITH ldud_latest AS (
-            SELECT DISTINCT ON (vcn_id) vcn_id, doc_status
+            SELECT DISTINCT ON (vcn_id) vcn_id, id AS ldud_id, doc_status
             FROM ldud_header ORDER BY vcn_id, id DESC
         )
         SELECT 'VCN_IMPORT' AS src, c.id, c.parcel_no, c.cargo_name, c.quantity,
                c.equipment_names, c.toll_applicable,
-               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name, ll.doc_status AS ldud_status
+               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name,
+               ll.ldud_id, ll.doc_status AS ldud_status
         FROM vcn_consigners c
         JOIN vcn_header h ON h.id = c.vcn_id
-        JOIN ldud_latest ll ON ll.vcn_id = h.id
-        WHERE c.importer_name = %s AND ll.doc_status = ANY(%s)
+        LEFT JOIN ldud_latest ll ON ll.vcn_id = h.id
+        WHERE c.importer_name = %s
+          AND (h.doc_status = 'Approved' OR ll.doc_status = ANY(%s))
         UNION ALL
         SELECT 'VCN_EXPORT' AS src, e.id, e.parcel_no, e.cargo_name, e.quantity,
                e.equipment_names, e.toll_applicable,
-               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name, ll.doc_status AS ldud_status
+               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name,
+               ll.ldud_id, ll.doc_status AS ldud_status
         FROM vcn_export_cargo_declaration e
         JOIN vcn_header h ON h.id = e.vcn_id
-        JOIN ldud_latest ll ON ll.vcn_id = h.id
-        WHERE e.importer_name = %s AND ll.doc_status = ANY(%s)
+        LEFT JOIN ldud_latest ll ON ll.vcn_id = h.id
+        WHERE e.importer_name = %s
+          AND (h.doc_status = 'Approved' OR ll.doc_status = ANY(%s))
         ORDER BY vcn_doc_num, parcel_no
     """, [customer_name, list(_CARGO_GATE), customer_name, list(_CARGO_GATE)])
     parcels = [dict(r) for r in cur.fetchall()]
+
+    # Actual handled qty (LUEU01) per parcel, for closed-LDUD vessels.
+    # ponytail: keyed by bare parcel id — one VCN's LDUD ops reference only one
+    # source table (its operation_type), so cross-table id collisions don't occur.
+    by_vcn = {}
+    for p in parcels:
+        by_vcn.setdefault(p['vcn_id'], []).append(p)
+    actual_by_vcn = {}
+    for vcn_id, plist in by_vcn.items():
+        if plist[0]['ldud_status'] in _CARGO_GATE and plist[0]['ldud_id']:
+            declared = {p['id']: p['quantity'] for p in plist}
+            actual_by_vcn[vcn_id] = _actual_qty_map(cur, plist[0]['ldud_id'], declared)
     conn.close()
 
     vessels = {}
     for p in parcels:
         src = p['src']
-        qty = _to_float(p['quantity'])
+        stage = 'actual' if p['ldud_status'] in _CARGO_GATE else 'proforma'
+        declared = _to_float(p['quantity'])
+        actual = None
+        if stage == 'actual':
+            aq = actual_by_vcn.get(p['vcn_id'], {}).get(p['id'])
+            actual = round(aq, 3) if aq is not None else None
+        qty = actual if actual is not None else declared
+
         cargo_code = 'CHGU01' if src == 'VCN_IMPORT' else 'CHGL01'
         # (service_code, cargo_name_for_rate) — cargo_name only for cargo-priced services
         charges = [(cargo_code, p['cargo_name']), ('INFM01', p['cargo_name'])]
@@ -754,6 +846,7 @@ def get_customer_billables(customer_type, customer_id):
         v = vessels.setdefault(p['vcn_id'], {
             'vcn_id': p['vcn_id'], 'vcn_doc_num': p['vcn_doc_num'],
             'vessel_name': p['vessel_name'], 'ldud_status': p['ldud_status'],
+            'stage': stage,
             'lines': [], 'total_amount': 0.0,
         })
         for code, cargo_for_rate in charges:
@@ -772,6 +865,7 @@ def get_customer_billables(customer_type, customer_id):
                 'parcel_no': p['parcel_no'], 'service_type_id': st['id'],
                 'service_code': code, 'service_name': st['service_name'],
                 'cargo_name': p['cargo_name'] or '', 'qty': remaining,
+                'declared_qty': declared, 'actual_qty': actual,
                 'uom': st['uom'] or 'MT', 'rate': rate, 'amount': amount,
                 'sac_code': st['sac_code'] or '', 'gst_rate_id': st['gst_rate_id'],
                 'is_tds': st['is_tds'], 'tds_percent': float(st['tds_percent'] or 0),
