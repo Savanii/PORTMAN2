@@ -182,6 +182,20 @@
     }
     .bpln-toolbar, #bplnStatus { display: none !important; }
 }
+.bpln-title-block {
+    text-align: center;
+    margin-bottom: 10px;
+}
+.bpln-title-block .line1,
+.bpln-title-block .line2 {
+    font-weight: bold;
+    font-size: 13px;
+    text-decoration: underline;
+}
+.bpln-title-block .line3 {
+    font-weight: bold;
+    font-size: 13px;
+}
 </style>
 {% endblock %}
 
@@ -212,6 +226,13 @@
 <div id="bplnStatus"></div>
 
 <div class="bpln-sheet">
+    <div class="bpln-sheet">
+
+    <div class="bpln-title-block">
+        <div class="line1">JSW JNPT LIQUID TERMINAL PRIVATE LIMITED</div>
+        <div class="line2">JAWAHARLAL NEHRU PORT AUTHORITY (BULK TERMINAL)</div>
+        <div class="line3">DAILY PERFORMANCE REPORT</div>
+    </div>
 
     <div class="bpln-as-on-row">
         <span class="lbl">As on</span>
@@ -219,6 +240,8 @@
         <span class="lbl">@</span>
         <span class="val-time" id="bplnAsOnTime">-</span>
     </div>
+    
+
 
     <!-- SECTION A — table body is built dynamically in JS from report.berths -->
     <h3 class="bpln-section-title">A] VESSEL OPERATION :- BERTHED VESSELS</h3>
@@ -271,7 +294,7 @@ const FIELDS_A = [
     ['VIA/F/OVERSEAS/IMO', '__via_f_ovs_imo'],
     ['VESSEL NAME', 'vessel_name'],
     ['LOA/BHC/DFT', '__loa_dft'],
-    ['AGT / TF/PL', 'agent'],
+    ['AGT / TF/PL', '__agt_tf_pl'],
     ['Consigner', 'consigner'],
     ['CARGO', 'cargo'],
     ['QUANTITY', 'quantity'],
@@ -289,13 +312,13 @@ const FIELDS_B = [
     ['VIA/F/OVERSEAS/IMO', '__via_f_ovs_imo'],
     ['VESSEL NAME', 'vessel_name'],
     ['LOA/BHC/DFT', '__loa_dft'],
-    ['AGT / TF/PL', 'agent'],
+    ['AGT / TF/PL', '__agt_tf_pl'],
     ['Consigner', 'consigner'],
     ['CARGO', 'cargo'],
     ['QUANTITY', 'quantity'],
     ['Alongside (Date/Time)', 'alongside'],
     ['OPS COMMENECED', 'ops_commenced'],
-    ['Cargo Completion Time', 'expected_completion'],
+    ['Cargo Completion Time', 'cargo_completion'],
     ['Sail Cast off time', 'cast_off'],
     ['Flow Rate (MT/hr)', 'present_flow_rate'],
 ];
@@ -313,6 +336,12 @@ function fieldValue(row, field) {
         const ovsDom = flag === 'india' ? 'Domestic' : 'Overseas';
         const imo = row.imo_num || '';
         return `${via} / F / ${ovsDom} / ${imo}`;
+    }
+    if (field === '__agt_tf_pl') {
+        const agt = row.vessel_agent || row.agent || '';
+        const tf = row.terminal || '';
+        const pl = row.pipeline || '';
+        return `${agt} / ${tf} / ${pl}`;
     }
     const v = row[field];
     return (v === null || v === undefined) ? '' : v;
@@ -447,7 +476,7 @@ async function loadBerthPlan() {
         const report = await abResp.json();
 
         document.getElementById('bplnAsOnDate').textContent = report.as_on_date || formatDateDMY(date);
-        document.getElementById('bplnAsOnTime').textContent = report.as_on_time || '07:00';
+        document.getElementById('bplnAsOnTime').textContent = report.as_on_time || '07:00 to 07:00 next day'; ;
 
         const berths = report.berths || [];   // fetched live from port_berth_master by the backend
         buildVerticalTable('tableA', report.berthed || [], berths, FIELDS_A);
