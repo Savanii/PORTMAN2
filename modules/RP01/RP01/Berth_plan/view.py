@@ -53,23 +53,30 @@ def get_berths(cur=None):
     return berths
 
 
-def get_expected_waiting_vessels():
+def get_expected_waiting_vessels(window_start, window_end):
     """Section C data — queried directly from expected_vessels (EV01 table).
     Excludes vessels already moved to VCN or closed to another terminal,
-    and excludes vessels that already have a berth assigned (those show
-    up in Section A/B instead)."""
+    vessels that already have a berth assigned (those show up in Section A/B
+    instead), and vessels that already have a VCN record created for them.
+    Only vessels whose ETA falls within the selected date's window are shown."""
     conn = get_db()
     cur = get_cursor(conn)
     try:
         cur.execute("""
-            SELECT terminal_name, vessel_name, via_number, loa, draft,
-                agents, tanks, consignees, cargo_name, mla, quantity,
-                eta, ata, lpc, doc, nor, berth_name
-            FROM expected_vessels
-            WHERE (doc_status IS NULL OR doc_status NOT IN ('Moved to VCN', 'Closed - Other Terminal'))
-              AND (berth_name IS NULL OR TRIM(berth_name) = '')
-            ORDER BY eta ASC NULLS LAST, id DESC
-        """)
+            SELECT ev.terminal_name, ev.vessel_name, ev.via_number, ev.loa, ev.draft,
+                ev.agents, ev.tanks, ev.consignees, ev.cargo_name, ev.mla, ev.quantity,
+                ev.eta, ev.ata, ev.lpc, ev.doc, ev.nor, ev.berth_name
+            FROM expected_vessels ev
+            WHERE (ev.doc_status IS NULL OR ev.doc_status NOT IN ('Moved to VCN', 'Closed - Other Terminal'))
+              AND (ev.berth_name IS NULL OR TRIM(ev.berth_name) = '')
+              AND NOT EXISTS (
+                  SELECT 1 FROM vcn_header h WHERE h.vessel_name = ev.vessel_name
+              )
+              AND ev.eta IS NOT NULL
+              AND (NULLIF(ev.eta::text, '')::timestamp) >= %s
+              AND (NULLIF(ev.eta::text, '')::timestamp) < %s
+            ORDER BY ev.eta ASC NULLS LAST, ev.id DESC
+        """, [window_start, window_end])
         rows = [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -460,7 +467,8 @@ def get_daily_report(plan_date_str):
         'berthed': get_berthed_vessels(window_start, window_end, berths),
         'sailed': get_sailed_vessels(window_start, window_end, berths),
         'berths': berths,
-        'expected': get_expected_waiting_vessels(),
+        
+        'expected': get_expected_waiting_vessels(window_start, window_end),
     }
 
 @bp.route('/api/module/RP02/berthplan/data')
