@@ -376,71 +376,8 @@ def get_vessel_master_doc(vessel_name):
     return None
 
 
-def build_consigner_rows(ev):
-    """Expand an EV01 row into VCN consigner rows — one row per IGM line.
-
-    Each row carries a single cargo + quantity (IGM/FORM III grain). When the
-    PDF's '+'-separated lists line up positionally, cargo[i]/qty[i] go to
-    consignee[i]; otherwise every consignee gets a line per cargo. Importer
-    defaults to the consignee (usually the same party on FORM III). BL no/date
-    are not in the daily report — the user fills them from the IGM.
-    """
-    def _split(key):
-        return [s.strip() for s in (ev.get(key) or '').split(',')
-                if s.strip() and not re.fullmatch(r'-+', s.strip())]
-
-    tanks = _split('tanks')
-    consignees = _split('consignees')
-    cargos = _split('cargo_name')
-    qtys = _split('quantity')
-    terminal = ev.get('terminal_name')
-
-    def _pick(lst, i):
-        if not lst:
-            return None
-        if len(lst) == len(consignees):
-            return lst[i]
-        return lst[0]
-
-    def _qty_for(j):
-        if j >= len(qtys):
-            return None
-        raw = qtys[j]
-        try:                       # cap at 3 decimal places, drop trailing zeros
-            return f'{round(float(raw), 3):.3f}'.rstrip('0').rstrip('.')
-        except (TypeError, ValueError):
-            return raw
-
-    def _cargo_items(i):
-        """[(cargo, qty), ...] for consignee i, index pairing preserved."""
-        if not cargos:
-            return [(None, None)]
-        if len(cargos) == len(consignees):
-            return [(cargos[i], _qty_for(i))]
-        if len(cargos) == 1:
-            return [(cargos[0], _qty_for(0))]
-        return [(c, _qty_for(j)) for j, c in enumerate(cargos)]
-
-    rows = []
-    line_no = 0
-    for i, consignee in enumerate(consignees or [None]):
-        for cargo, _qty in _cargo_items(i):
-            line_no += 1
-            rows.append({
-                'igm_line_no':     str(line_no),
-                'cargo_name':      cargo,
-                # quantity, pipeline and unload terminal are NOT autofilled on the
-                # EV01→VCN move (the per-cargo total was being duplicated across
-                # consignees). The operator allocates per parcel in VCN01, validated
-                # against the per-cargo quota captured below.
-                'quantity':        None,
-                'consigner_name':  consignee,
-                'importer_name':   consignee,
-                'pipeline_name':   None,
-                'unload_terminal': None,
-            })
-    return rows
-
+# EV01 no longer creates VCN parcels on the move — the parsed consignee/qty
+# lists proved unreliable; parcels are entered in VCN01 from the IGM.
 
 def cargo_quotas(ev):
     """Per-cargo total quantity from the EV01 record: {cargo_name: total_qty}.

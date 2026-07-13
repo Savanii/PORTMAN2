@@ -145,11 +145,10 @@ def move_to_vcn(ev_id):
         'discharge_port':    vcn_model.default_discharge_port(),
     }
     vcn_id, vcn_doc_num = vcn_model.save_header(vcn_data)
-    # Per-cargo totals (available-to-allocate) captured before parcels are saved,
-    # so the parcel-quantity validation has a quota to check against.
+    # Per-cargo totals (available-to-allocate) so parcel-quantity validation
+    # has a quota to check against. Parcels themselves are NOT created from
+    # EV01 — its consignee/qty lists are parsed PDF text and unreliable; the
+    # operator enters parcels in VCN01 from the IGM.
     vcn_model.save_cargo_quotas(vcn_id, model.cargo_quotas(ev))
-    for row in model.build_consigner_rows(ev):
-        row['vcn_id'] = vcn_id
-        vcn_model.save_consigner(row)
     model.mark_moved_to_vcn(ev_id, vcn_id)
     return jsonify({'vcn_id': vcn_id, 'vcn_doc_num': vcn_doc_num})
