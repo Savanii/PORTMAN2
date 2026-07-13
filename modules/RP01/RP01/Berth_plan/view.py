@@ -1,6 +1,6 @@
 """
 RP02 — Berth Plan (page + daily-report data), living on the shared
-RP01 blueprint — same pattern as RP01/JJLTPL/jjltpl.py.
+
 """
 
 from datetime import datetime, timedelta
@@ -113,10 +113,10 @@ def berth_plan_page():
 
 
 def get_report_window(plan_date_str):
-    """'As on <date> @ 07:00' covers the PRIOR 24 hours: (date-1) 07:00 -> date 07:00."""
+    """'As on <date> @ 07:00' covers the NEXT 24 hours: date 07:00 -> (date+1) 07:00."""
     plan_date = datetime.strptime(plan_date_str, '%Y-%m-%d')
-    window_end = plan_date.replace(hour=7, minute=0, second=0, microsecond=0)
-    window_start = window_end - timedelta(days=1)
+    window_start = plan_date.replace(hour=7, minute=0, second=0, microsecond=0)
+    window_end = window_start + timedelta(days=1)
     return window_start, window_end
 
 
@@ -131,6 +131,49 @@ def _fmt_dt(v, fmt='%d-%m-%Y %H:%M'):
         except ValueError:
             return v
     return v.strftime(fmt)
+
+
+def _cumulative_as_of(cur, ldud_id, window_end):
+    """Everything logged strictly BEFORE window_end (i.e. as of the report's
+    cut-off date/time) — so 'Till now', 'Balance', and 'Present Flow Rate' for
+    a past-dated report reflect only the data that existed up to that day,
+    not entries operators logged later for subsequent days.
+
+    Returns (logged_qty, total_hours) — real (non-shortclose) rows only, so
+    the flow-rate math matches get_started_parcels' avg_rate definition.
+    Shortclosed quantity is intentionally excluded here too, matching the
+    'real_qty' used for avg_rate in LUEU01; balance still nets against target
+    the same way callers already expect (target - logged), consistent with
+    how a report for an in-progress vessel should read as of that date.
+    """
+    cur.execute('''
+        SELECT po.id AS parcel_op_id
+        FROM ldud_parcel_ops po WHERE po.ldud_id = %s
+    ''', [ldud_id])
+    pop_ids = [r['parcel_op_id'] for r in cur.fetchall()]
+    if not pop_ids:
+        return 0.0, 0.0
+
+    cur.execute('''
+        SELECT COALESCE(SUM(quantity), 0) AS qty,
+               COALESCE(SUM(
+                 EXTRACT(EPOCH FROM (
+                   COALESCE(NULLIF(to_time,'')::time, '00:00'::time)
+                   - COALESCE(NULLIF(from_time,'')::time, '00:00'::time)
+                   + CASE WHEN NULLIF(to_time,'')::time < NULLIF(from_time,'')::time
+                          THEN INTERVAL '24 hours' ELSE INTERVAL '0' END
+                 )) / 3600.0
+               ), 0) AS hrs
+        FROM lueu_parcel_log
+        WHERE parcel_op_id = ANY(%s)
+          AND is_deleted IS NOT TRUE
+          AND is_shortclose IS NOT TRUE
+          AND (NULLIF(entry_date, '')::timestamp
+               + COALESCE(NULLIF(from_time, '')::time, '00:00'::time)) < %s
+    ''', [pop_ids, window_end])
+    row = cur.fetchone()
+    return float(row['qty'] or 0), float(row['hrs'] or 0)
+
 
 MIN_HOURS_FOR_ACTUAL = 4      # must match MIN_HOURS_FOR_ACTUAL in lueu01.html
 MAX_REASONABLE_DAYS = 90      # if the actual-rate ETC projects beyond this, treat it as unreliable
@@ -152,13 +195,22 @@ def _enrich_vessel(cur, vcn_id, ldud_id, window_start, window_end):
                    FROM ldud_parcel_ops po WHERE po.ldud_id=%s''', [ldud_id])
     ops_commenced = cur.fetchone()['started']
 
+    # target_qty comes from the live VCN parcel quantities (via get_started_parcels) —
+    # this is a "current truth" number and is NOT date-dependent.
     parcels = get_started_parcels(vcn_id)
     target_qty = float(sum(p['target_qty'] for p in parcels))
-    logged_qty = float(sum(p['logged_qty'] for p in parcels))
+
+    # ── logged_qty / total_hours are date-dependent: they must reflect ONLY
+    #    what had actually been logged as of this report's date, not the
+    #    all-time total (which may already include days after the report date
+    #    if operators have logged ahead). This makes 'Till now', 'Balance',
+    #    and 'Present Flow Rate' change day-by-day correctly for a vessel that
+    #    spans multiple days, instead of always showing the final/latest state. ──
+    logged_qty, total_hours = _cumulative_as_of(cur, ldud_id, window_end)
     balance_qty = round(target_qty - logged_qty, 3)
-    total_hours = float(sum(p['op_hours'] for p in parcels))
     present_flow_rate = round(logged_qty / total_hours, 2) if total_hours > 0 else 0
 
+    # Last-24-hours figure — already correctly window-bound (unchanged).
     cur.execute('''
         SELECT COALESCE(SUM(l.quantity), 0) AS q
         FROM lueu_parcel_log l
@@ -173,10 +225,10 @@ def _enrich_vessel(cur, vcn_id, ldud_id, window_start, window_end):
 
     expected_completion = ''
     is_planned = False
-    display_rate = present_flow_rate   # what we SHOW as Present Flow Rate — always the real actual rate when it exists
+    display_rate = present_flow_rate   # default: show the real actual rate (as-of this date)
 
     def _planned_etc():
-        """Latest projected ETC across all parcels, from Expected Start/Rate."""
+        """Latest projected ETC + its rate, across all parcels (Expected Start/Rate)."""
         best_etc, best_rate = None, 0
         for p in parcels:
             rate = float(p.get('expected_flow_rate') or 0)
@@ -193,26 +245,33 @@ def _enrich_vessel(cur, vcn_id, ldud_id, window_start, window_end):
                 best_etc, best_rate = etc_dt, rate
         return best_etc, best_rate
 
+    # whether the actual logged rate (as of this report's date) is trustworthy
+    # enough to use as-is
+    has_actual = present_flow_rate > 0 and total_hours >= MIN_HOURS_FOR_ACTUAL
+
     if balance_qty > 0:
         actual_etc = None
-        if present_flow_rate > 0 and total_hours >= MIN_HOURS_FOR_ACTUAL:
+        if has_actual:
             hrs_left = balance_qty / present_flow_rate
             actual_etc = window_end + timedelta(hours=hrs_left)
 
-        # trust the actual-rate ETC only if it's within a sane horizon
         if actual_etc and (actual_etc - window_end).days <= MAX_REASONABLE_DAYS:
             expected_completion = actual_etc.strftime('%d-%m-%Y %H:%M')
         else:
-            # actual rate missing, too little data, OR projects absurdly far out
-            # (e.g. one tiny log entry over many idle hours) — fall back to plan
-            best_etc, best_rate = _planned_etc()
+            best_etc, _ = _planned_etc()
             if best_etc:
                 expected_completion = best_etc.strftime('%d-%m-%Y %H:%M')
                 is_planned = True
-                # only borrow the planned rate for display if there's no real rate at all;
-                # if a real (if slow) rate exists, keep showing it — it's still correct data
-                if not (present_flow_rate > 0 and total_hours >= MIN_HOURS_FOR_ACTUAL):
-                    display_rate = best_rate
+
+    # ── Flow-rate display: SAME rule for BOTH Section A (berthed) and
+    #    Section B (sailed) rows — no longer gated on balance_qty>0.
+    #    Use the real actual rate whenever there's enough logged data (as of
+    #    this report's date); otherwise fall back to the planned/expected rate. ──
+    if not has_actual:
+        _, best_rate = _planned_etc()
+        if best_rate:
+            display_rate = best_rate
+            is_planned = True   # amber highlight, same as before
 
     return {
         'consigner': consigner,
@@ -225,6 +284,7 @@ def _enrich_vessel(cur, vcn_id, ldud_id, window_start, window_end):
         'present_flow_rate': display_rate,
         'is_planned': is_planned,
     }
+
 
 def _base_row(h):
     return {
@@ -248,8 +308,17 @@ def get_berthed_vessels(window_start, window_end, berths):
     cur.execute('''
         SELECT DISTINCT h.id AS vcn_id, l.id AS ldud_id, h.via_number, h.vessel_name,
                h.loa, h.draft, h.vessel_agent_name, h.cargo_type, h.berth_name,
+               h.operation_type,
                v.imo_num, v.nationality,
-               l.alongside_datetime
+               l.alongside_datetime,
+               (SELECT ec.unload_terminal FROM vcn_export_cargo_declaration ec
+                 WHERE ec.vcn_id = h.id LIMIT 1) AS exp_terminal,
+               (SELECT ec.pipeline_name FROM vcn_export_cargo_declaration ec
+                 WHERE ec.vcn_id = h.id LIMIT 1) AS exp_pipeline,
+               (SELECT cn.unload_terminal FROM vcn_consigners cn
+                 WHERE cn.vcn_id = h.id LIMIT 1) AS imp_terminal,
+               (SELECT cn.pipeline_name FROM vcn_consigners cn
+                 WHERE cn.vcn_id = h.id LIMIT 1) AS imp_pipeline
         FROM ldud_parcel_ops po
         JOIN ldud_header l ON l.id = po.ldud_id
         JOIN vcn_header h ON h.id = l.vcn_id
@@ -265,44 +334,76 @@ def get_berthed_vessels(window_start, window_end, berths):
     for h in headers:
         row = _base_row(h)
         row['alongside'] = _fmt_dt(h['alongside_datetime'])
+        row['vessel_agent'] = h['vessel_agent_name']
+        row['terminal'] = h['exp_terminal'] if h['operation_type'] == 'Export' else h['imp_terminal']
+        row['pipeline'] = h['exp_pipeline'] if h['operation_type'] == 'Export' else h['imp_pipeline']
         row.update(_enrich_vessel(cur, h['vcn_id'], h['ldud_id'], window_start, window_end))
         out.append(row)
     conn.close()
     return out
-
 
 def get_sailed_vessels(window_start, window_end, berths):
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('''
-        SELECT h.id AS vcn_id, l.id AS ldud_id, h.via_number, h.vessel_name,
+    cur.execute(f'''
+        SELECT DISTINCT h.id AS vcn_id, l.id AS ldud_id, h.via_number, h.vessel_name,
                h.loa, h.draft, h.vessel_agent_name, h.cargo_type, h.berth_name,
+               h.operation_type,
                v.imo_num, v.nationality,
-               l.alongside_datetime, MAX(po.end_dt::timestamp) AS sail_dt
-        FROM ldud_parcel_ops po
-        JOIN ldud_header l ON l.id = po.ldud_id
+               l.alongside_datetime, l.{SAIL_COLUMN}::timestamp AS sail_dt,
+               (SELECT ec.unload_terminal FROM vcn_export_cargo_declaration ec
+                 WHERE ec.vcn_id = h.id LIMIT 1) AS exp_terminal,
+               (SELECT ec.pipeline_name FROM vcn_export_cargo_declaration ec
+                 WHERE ec.vcn_id = h.id LIMIT 1) AS exp_pipeline,
+               (SELECT cn.unload_terminal FROM vcn_consigners cn
+                 WHERE cn.vcn_id = h.id LIMIT 1) AS imp_terminal,
+               (SELECT cn.pipeline_name FROM vcn_consigners cn
+                 WHERE cn.vcn_id = h.id LIMIT 1) AS imp_pipeline,
+               (SELECT MAX(po.end_dt::timestamp)
+                  FROM ldud_parcel_ops po
+                 WHERE po.ldud_id = l.id) AS cargo_completion_dt
+        FROM ldud_header l
         JOIN vcn_header h ON h.id = l.vcn_id
         LEFT JOIN vessels v ON v.vessel_name = h.vessel_name
-        WHERE h.berth_name = ANY(%s)
-        GROUP BY h.id, l.id, h.via_number, h.vessel_name, h.loa, h.draft,
-                 h.vessel_agent_name, h.cargo_type, h.berth_name, v.imo_num, v.nationality,
-                 l.alongside_datetime
-        HAVING COUNT(*) FILTER (WHERE po.end_dt IS NULL) = 0
-           AND MAX(po.end_dt::timestamp) BETWEEN %s AND %s
         ORDER BY h.berth_name
-    ''', (berths, window_start, window_end))
+    ''')
     headers = [dict(r) for r in cur.fetchall()]
+
+    def _in_window(dt):
+        # window_start (inclusive) -> window_end (exclusive), so a vessel
+        # landing exactly on the boundary belongs to ONE day only, never both
+        return dt is not None and window_start <= dt < window_end
 
     out = []
     for h in headers:
+        sail_dt = h['sail_dt']
+        completion_dt = h['cargo_completion_dt']
+
+        if sail_dt:
+            # ---- PRIORITY 1: cast off exists -> show ONLY on the day it happened ----
+            if not _in_window(sail_dt):
+                continue   # previous day or next day -> skip entirely
+        else:
+            # ---- PRIORITY 2: no cast off yet -> fall back to cargo completion date ----
+            if not _in_window(completion_dt):
+                continue
+
         row = _base_row(h)
         row['alongside'] = _fmt_dt(h['alongside_datetime'])
-        row['cast_off'] = _fmt_dt(h['sail_dt'])
+        row['cast_off'] = _fmt_dt(sail_dt)
+        row['cargo_completion'] = _fmt_dt(completion_dt)
+        row['vessel_agent'] = h['vessel_agent_name']
+        row['terminal'] = h['exp_terminal'] if h['operation_type'] == 'Export' else h['imp_terminal']
+        row['pipeline'] = h['exp_pipeline'] if h['operation_type'] == 'Export' else h['imp_pipeline']
         row.update(_enrich_vessel(cur, h['vcn_id'], h['ldud_id'], window_start, window_end))
+
+        balance = row.get('balance')
+        if not (balance is not None and balance <= 0):
+            continue   # cargo अजून पूर्ण झालेला नाही -> sailed मध्ये नको
+
         out.append(row)
     conn.close()
     return out
-
 
 def get_daily_report(plan_date_str):
     window_start, window_end = get_report_window(plan_date_str)
@@ -312,14 +413,14 @@ def get_daily_report(plan_date_str):
     conn.close()
 
     return {
-        'as_on_date': window_end.strftime('%d-%m-%Y'),
-        'as_on_time': window_end.strftime('%H:%M'),
+        'as_on_date': window_start.strftime('%d-%m-%Y'),
+        'as_on_time': window_start.strftime('%H:%M'),
         'window_start': window_start.isoformat(),
         'window_end': window_end.isoformat(),
         'berthed': get_berthed_vessels(window_start, window_end, berths),
         'sailed': get_sailed_vessels(window_start, window_end, berths),
         'berths': berths,
-        'expected': get_expected_waiting_vessels(),   # <-- ADD THIS LINE
+        'expected': get_expected_waiting_vessels(),
     }
 
 @bp.route('/api/module/RP02/berthplan/data')
@@ -334,7 +435,7 @@ def rp02_data():
 
 FIELDS_A = [
     ('VIA/F/OVERSEAS/IMO', '__via_f_ovs_imo'), ('VESSEL NAME', 'vessel_name'),
-    ('LOA/BHC/DFT', '__loa_dft'), ('AGT / TF/PL', 'agent'), ('Consigner', 'consigner'),
+    ('LOA/BHC/DFT', '__loa_dft'), ('AGT / TF/PL', '__agt_tf_pl'), ('Consigner', 'consigner'),
     ('CARGO', 'cargo'), ('QUANTITY', 'quantity'), ('Alongside (Date/Time)', 'alongside'),
     ('OPS COMMENECED', 'ops_commenced'), ('Last 24 hrs Load/Discharge', 'last_24hr_qty'),
     ('Till now discharged / Load', 'till_now_qty'), ('BALANCE', 'balance'),
@@ -343,9 +444,9 @@ FIELDS_A = [
 ]
 FIELDS_B = [
     ('VIA/F/OVERSEAS/IMO', '__via_f_ovs_imo'), ('VESSEL NAME', 'vessel_name'),
-    ('LOA/BHC/DFT', '__loa_dft'), ('AGT / TF/PL', 'agent'), ('Consigner', 'consigner'),
+    ('LOA/BHC/DFT', '__loa_dft'), ('AGT / TF/PL', '__agt_tf_pl'), ('Consigner', 'consigner'),
     ('CARGO', 'cargo'), ('QUANTITY', 'quantity'), ('Alongside (Date/Time)', 'alongside'),
-    ('OPS COMMENECED', 'ops_commenced'), ('Cargo Completion Time', 'expected_completion'),
+    ('OPS COMMENECED', 'ops_commenced'), ('Cargo Completion Time', 'cargo_completion'),
     ('Sail Cast off time', 'cast_off'), ('Flow Rate (MT/hr)', 'present_flow_rate'),
 ]
 
@@ -361,10 +462,14 @@ def _xl_field_value(row, field):
         ovs = 'Domestic' if flag == 'india' else 'Overseas'
         imo = row.get('imo_num') or ''
         return f"{via} / F / {ovs} / {imo}"
+    if field == '__agt_tf_pl':
+        agt = row.get('vessel_agent') or row.get('agent') or ''
+        tf = row.get('terminal') or ''
+        pl = row.get('pipeline') or ''
+        return f"{agt} / {tf} / {pl}"
     val = row.get(field)
     if val is None:
         return ''
-    # mirror the webpage: append "(Exp)" to a planned expected-completion value
     if field == 'expected_completion' and row.get('is_planned') and val:
         return f"{val} (Exp)"
     return val
@@ -382,6 +487,7 @@ def rp02_export_excel():
     ws.title = 'Berth Plan'
 
     bold = Font(bold=True)
+    bold_underline = Font(bold=True, underline='single')   # title lines 1 & 2
     section_font = Font(bold=True, underline='single', color='0000C8')
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     header_fill = PatternFill('solid', fgColor='DCE6F1')
@@ -395,87 +501,143 @@ def rp02_export_excel():
     FONT_EMPTY   = Font(color='CBD5E1', bold=False)  # no vessel at this berth  -> light grey
 
     r = 1
-    title_rows = []  # (row_idx, text) — merged + centered across full width once max_col is known
-    title_rows.append((r, 'JSW JNPT LIQUID TERMINAL PRIVATE LIMITED')); r += 1
-    title_rows.append((r, 'JAWAHARLAL NEHRU PORT AUTHORITY (BULK TERMINAL)')); r += 1
-    title_rows.append((r, 'DAILY PERFORMANCE REPORT')); r += 2
+    title_rows = []
+    title_rows.append((r, 'JSW JNPT LIQUID TERMINAL PRIVATE LIMITED', bold_underline)); r += 1
+    title_rows.append((r, 'JAWAHARLAL NEHRU PORT AUTHORITY (BULK TERMINAL)', bold_underline)); r += 1
+    title_rows.append((r, 'DAILY PERFORMANCE REPORT', bold)); r += 2
 
-    # "As on <date> @ <time>" — colored like the webpage's .bpln-as-on-row
     ws.cell(r, 1, 'As on').font = bold
     date_cell = ws.cell(r, 2, report['as_on_date'])
-    date_cell.font = Font(bold=True, color='C00000')          # red, like .val-date
+    date_cell.font = Font(bold=True, color='C00000')
     date_cell.alignment = Alignment(horizontal='center')
     ws.cell(r, 3, '@').font = bold
     time_cell = ws.cell(r, 4, report['as_on_time'])
-    time_cell.font = Font(bold=True, color='0000C8')          # blue, like .val-time
+    time_cell.font = Font(bold=True, color='0000C8')
     time_cell.alignment = Alignment(horizontal='center')
     r += 2
 
-    max_col = 1
+    c_headers = ['TERMINAL', 'VESSEL NAME', 'VIA NO.', 'LOA', 'DFT', 'AGT/TNK/CONS', 'CARGO',
+                 'MLA', 'QTY.', 'ETA', 'ATA', 'LPC', 'DOC', 'NOR', 'BERTH']
 
-    def write_vertical_section(title, vessels, fields):
-        nonlocal r, max_col
-        ws.cell(r, 1, title).font = section_font
-        r += 1
+    # ------------------------------------------------------------------
+    # Column-width matching logic
+    # ------------------------------------------------------------------
+    # Section C always has len(c_headers) = 15 physical columns (cols 1-15).
+    # Section A/B use column 1 as the "DETAILS" label, so their data needs
+    # to fill columns 2..15 (14 columns) for the two tables' right edges
+    # to line up exactly - whether those columns hold real vessel data or
+    # are empty, they get merged/stretched to fill the same total width
+    # as Section C (same as how the webpage stretches columns to 100%).
+    #
+    # If there are genuinely more concurrent vessels than 14 slots, we
+    # expand beyond 14 (never hide real data) - in that rare case Section
+    # C will end up narrower than A/B, since C's column count is fixed.
+    # ------------------------------------------------------------------
 
+    def group_by_berth(vessels):
         by_berth = {b: [] for b in berths}
         for v in vessels:
             b = v.get('berth_name') or '(no berth)'
             by_berth.setdefault(b, []).append(v)
-        cols = [(b, vs if vs else [None]) for b, vs in by_berth.items()]
+        return [(b, vs if vs else [None]) for b, vs in by_berth.items()]
 
-        # header row
-        c = 2
+    cols_A = group_by_berth(report['berthed'])
+    cols_B = group_by_berth(report['sailed'])
+
+    # per-berth minimum columns needed = max vessels at that berth across A & B,
+    # so berth columns line up vertically between Section A and Section B too
+    mins = [max(len(cols_A[i][1]), len(cols_B[i][1])) for i in range(len(cols_A))]
+    total_min = sum(mins) if mins else 0
+
+    target_data_cols = max(len(c_headers) - 1, total_min)   # normally 14
+    extra = target_data_cols - total_min
+    spans = mins[:]
+    if spans:
+        i = 0
+        while extra > 0:                       # spread leftover width evenly, round-robin
+            spans[i % len(spans)] += 1
+            extra -= 1
+            i += 1
+
+    max_col = max(1 + target_data_cols, len(c_headers))
+
+    def distribute(total, parts):
+        """Split `total` columns into `parts` groups, as evenly as possible."""
+        if parts <= 0:
+            return []
+        base, rem = divmod(total, parts)
+        return [base + (1 if i < rem else 0) for i in range(parts)]
+
+    fields_map = {
+        'A] VESSEL OPERATION :- BERTHED VESSELS': FIELDS_A,
+        'B] VESSEL OPERATION :- SAILED VESSELS': FIELDS_B,
+    }
+
+    def write_vertical_section(title, cols):
+        nonlocal r
+        ws.cell(r, 1, title).font = section_font
+        r += 1
+
         ws.cell(r, 1, 'DETAILS').font = bold
         ws.cell(r, 1).fill = header_fill
         ws.cell(r, 1).border = border
-        for b, vs in cols:
+
+        c = 2
+        vessel_ranges = []   # (start_col, span) per vessel, in cols order
+        for (b, vs), span in zip(cols, spans):
             start_c = c
-            for _ in vs:
-                cell = ws.cell(r, c)
+            for cc in range(start_c, start_c + span):
+                cell = ws.cell(r, cc)
                 cell.fill = header_fill
                 cell.border = border
-                c += 1
             ws.cell(r, start_c, b).font = bold
             ws.cell(r, start_c).alignment = center
-            if len(vs) > 1:
-                ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + len(vs) - 1)
+            if span > 1:
+                ws.merge_cells(start_row=r, start_column=start_c,
+                                end_row=r, end_column=start_c + span - 1)
+            sub_spans = distribute(span, len(vs))
+            cc = start_c
+            for vs_span in sub_spans:
+                vessel_ranges.append((cc, vs_span))
+                cc += vs_span
+            c = start_c + span
         r += 1
-        max_col = max(max_col, c - 1)
 
-        for label, field in fields:
+        for label, field in fields_map[title]:
             ws.cell(r, 1, label).font = bold
             ws.cell(r, 1).fill = label_fill
             ws.cell(r, 1).border = border
-            c = 2
+            idx = 0
             for b, vs in cols:
                 for v in vs:
+                    start_c, span = vessel_ranges[idx]
+                    idx += 1
                     val = _xl_field_value(v, field)
-                    cell = ws.cell(r, c, val)
-                    cell.border = border
+                    cell = ws.cell(r, start_c, val)
+                    for cc in range(start_c, start_c + span):
+                        ws.cell(r, cc).border = border
                     cell.alignment = center
+                    if span > 1:
+                        ws.merge_cells(start_row=r, start_column=start_c,
+                                        end_row=r, end_column=start_c + span - 1)
                     if v is None:
                         cell.font = FONT_EMPTY
                     elif v.get('is_planned') and field in ('present_flow_rate', 'expected_completion'):
                         cell.font = FONT_PLANNED
                     else:
                         cell.font = FONT_VALUE
-                    c += 1
             r += 1
         r += 1
 
-    write_vertical_section('A] VESSEL OPERATION :- BERTHED VESSELS', report['berthed'], FIELDS_A)
-    write_vertical_section('B] VESSEL OPERATION :- SAILED VESSELS', report['sailed'], FIELDS_B)
+    write_vertical_section('A] VESSEL OPERATION :- BERTHED VESSELS', cols_A)
+    write_vertical_section('B] VESSEL OPERATION :- SAILED VESSELS', cols_B)
 
     ws.cell(r, 1, 'C] Expected /Waiting Tank Vessels at JJLTPL Berth').font = section_font
     r += 1
-    c_headers = ['TERMINAL', 'VESSEL NAME', 'VIA NO.', 'LOA', 'DFT', 'AGT/TNK/CONS', 'CARGO',
-                 'MLA', 'QTY.', 'ETA', 'ATA', 'LPC', 'DOC', 'NOR', 'BERTH']
     for col_i, h in enumerate(c_headers, start=1):
         cell = ws.cell(r, col_i, h)
         cell.font = bold; cell.fill = header_fill; cell.alignment = center; cell.border = border
     r += 1
-    max_col = max(max_col, len(c_headers))
 
     for row in report['expected']:
         vals = [row.get('terminal'), row.get('vessel_name'), row.get('via_no'), row.get('loa'),
@@ -488,9 +650,9 @@ def rp02_export_excel():
             cell.alignment = center
         r += 1
 
-    # now that max_col is known, merge + center the three title rows across the full width
-    for row_idx, text in title_rows:
-        ws.cell(row_idx, 1, text).font = bold
+    # merge + center the three title rows now that max_col is final
+    for row_idx, text, font in title_rows:
+        ws.cell(row_idx, 1, text).font = font
         ws.cell(row_idx, 1).alignment = Alignment(horizontal='center')
         ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=max_col)
 
@@ -498,7 +660,6 @@ def rp02_export_excel():
     for i in range(2, max_col + 1):
         ws.column_dimensions[get_column_letter(i)].width = 16
 
-    # center the whole report horizontally on the printed page
     ws.print_options.horizontalCentered = True
     ws.page_setup.orientation = 'landscape'
     ws.page_setup.fitToWidth = 1
