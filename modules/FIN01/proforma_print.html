@@ -2,104 +2,130 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Pro Forma Invoice — {{ vessel.vcn_doc_num }}</title>
+<title>Pro-Forma Invoice — {{ vessel.vcn_doc_num }}</title>
 <style>
-    body { font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #222; margin: 24px; }
-    .doc { max-width: 900px; margin: 0 auto; border: 1px solid #ccc; padding: 24px; }
-    .doc-title { text-align: center; font-size: 20px; font-weight: 800; letter-spacing: 2px; margin-bottom: 2px; }
-    .doc-subtitle { text-align: center; color: #b91c1c; font-size: 11px; font-weight: 600; margin-bottom: 18px; }
-    .head-grid { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 14px; }
-    .head-block { flex: 1; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px; }
-    .head-block h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; color: #6b7280; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
-    .head-block div { margin: 2px 0; }
-    table.lines { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    table.lines th { background: #f3f4f6; border: 1px solid #d1d5db; padding: 6px; font-size: 10px; text-transform: uppercase; }
-    table.lines td { border: 1px solid #d1d5db; padding: 6px; }
+    body { font-family: Calibri, Arial, Helvetica, sans-serif; font-size: 13px; color: #000; margin: 0; background: #f0f0f0; }
+    .page { width: 860px; margin: 0 auto; background: white; padding: 30px 40px 40px; box-sizing: border-box; }
+    .letterhead { width: 100%; margin-bottom: 24px; }
+    .letterhead img { width: 100%; display: block; }
+
+    .box { border: 1.5px solid #000; }
+    .box .row { border-bottom: 1.5px solid #000; }
+    .title { text-align: center; font-size: 16px; font-weight: 700; padding: 8px; }
+    .refdate { display: flex; justify-content: space-between; padding: 8px 10px; font-weight: 700; }
+    .to-block { padding: 8px 10px 14px; min-height: 110px; }
+    .to-block div { line-height: 1.35; }
+
+    table.lines { width: 100%; border-collapse: collapse; }
+    table.lines th, table.lines td { padding: 4px 8px; }
+    table.lines thead th { border-bottom: 1.5px solid #000; font-weight: 700; text-align: center; }
+    .col-qty, .col-rate, .col-amt { border-left: 1.5px solid #000; width: 110px; }
+    .col-amt { width: 140px; }
     .num { text-align: right; }
-    .totals { margin-top: 12px; margin-left: auto; width: 320px; }
-    .totals div { display: flex; justify-content: space-between; padding: 3px 8px; }
-    .totals .grand { font-weight: 800; font-size: 14px; border-top: 2px solid #222; margin-top: 4px; padding-top: 6px; }
-    .disclaimer { margin-top: 18px; font-size: 10px; color: #6b7280; border-top: 1px dashed #d1d5db; padding-top: 8px; }
+    .vessel-row td:first-child { font-weight: 700; text-decoration: underline; }
+    .particulars-body td { border-bottom: none; }
+    .subtotal-row td { border-top: 1.5px solid #000; font-weight: 700; }
+    .total-row td { border-top: 1.5px solid #000; font-weight: 700; }
+    .spacer-row td { height: 34px; }
+    .words { padding: 6px 10px; font-weight: 700; }
+
+    .sign-block { display: flex; justify-content: flex-end; padding: 26px 10px 6px; }
+    .sign-inner { text-align: center; }
+    .sign-line { margin-top: 44px; font-weight: 700; }
+    .gst-pan { padding: 4px 10px 12px; font-weight: 700; line-height: 1.5; }
+    .pay-note { border-top: 1.5px solid #000; padding: 8px 10px; font-weight: 700; font-size: 12px; line-height: 1.4; }
+    .rate-note { padding: 4px 10px; font-size: 11px; color: #b91c1c; }
+
     .print-btn { position: fixed; top: 12px; right: 12px; padding: 8px 18px; background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-    @media print { .print-btn { display: none; } body { margin: 0; } .doc { border: none; } }
+    @media print {
+        .print-btn { display: none; }
+        body { background: white; }
+        .page { width: 100%; padding: 0; }
+    }
 </style>
 </head>
 <body>
 <button class="print-btn" onclick="window.print()">🖨 Print</button>
-<div class="doc">
-    <div class="doc-title">PRO FORMA INVOICE</div>
-    <div class="doc-subtitle">NOT A TAX INVOICE — estimate based on declared / BL quantities</div>
+<div class="page">
+    <div class="letterhead"><img src="/static/img/invoice_header.png" alt="JNPT Liquid Terminal Private Limited"></div>
 
-    <div class="head-grid">
-        <div class="head-block">
-            <h4>From</h4>
-            <div><b>{{ seller.legal_name }}</b></div>
-            <div>{{ seller.address }}</div>
-            <div>{{ seller.location }} {{ ('- ' ~ seller.pincode) if seller.pincode else '' }}</div>
-            {% if seller.gstin %}<div>GSTIN: {{ seller.gstin }}</div>{% endif %}
-            {% if seller.phone %}<div>Ph: {{ seller.phone }}</div>{% endif %}
-            {% if seller.email %}<div>{{ seller.email }}</div>{% endif %}
+    <div class="box">
+        <div class="row title">PRO-FORMA INVOICE</div>
+
+        <div class="row refdate">
+            <span>Ref.No: {{ ref_no }}</span>
+            <span>DATE:&nbsp; {{ date_str }}</span>
         </div>
-        <div class="head-block">
-            <h4>To ({{ customer_type }})</h4>
+
+        <div class="row to-block">
+            <div>To,</div>
             <div><b>{{ customer.name }}</b></div>
             {% if customer.billing_address %}<div>{{ customer.billing_address }}</div>{% endif %}
-            <div>{{ customer.city or '' }} {{ ('- ' ~ customer.pincode) if customer.pincode else '' }}</div>
-            {% if customer.gstin %}<div>GSTIN: {{ customer.gstin }}</div>{% endif %}
+            {% if customer.city or customer.pincode %}<div>{{ customer.city or '' }}{{ ', ' ~ customer.pincode if customer.pincode else '' }}</div>{% endif %}
+            {% if customer.gstin %}<div>GSTIN:- &nbsp;{{ customer.gstin }}</div>{% endif %}
         </div>
-        <div class="head-block">
-            <h4>Vessel</h4>
-            <div><b>{{ vessel.vessel_name or '' }}</b></div>
-            <div>VCN: {{ vessel.vcn_doc_num }}</div>
-            <div>LDUD Status: {{ vessel.ldud_status or 'Open' }}</div>
-            <div>Date: {{ print_date }}</div>
+
+        <div class="row">
+            <table class="lines">
+                <thead>
+                    <tr>
+                        <th>Particulars</th>
+                        <th class="col-qty">Qty. in<br>MT</th>
+                        <th class="col-rate">Rate<br>(Rs.)/MT</th>
+                        <th class="col-amt">Amount<br>(Rs.)</th>
+                    </tr>
+                </thead>
+                <tbody class="particulars-body">
+                    <tr class="vessel-row">
+                        <td>{{ vessel.vessel_name or vessel.vcn_doc_num }}</td>
+                        <td class="col-qty"></td><td class="col-rate"></td><td class="col-amt"></td>
+                    </tr>
+                    {% for l in lines %}
+                    <tr>
+                        <td>{{ l.service_name }}{{ ' — ' ~ l.cargo_name if l.cargo_name else '' }}</td>
+                        <td class="col-qty num">{{ l.qty_fmt }}</td>
+                        <td class="col-rate num">{{ l.rate_fmt }}</td>
+                        <td class="col-amt num">{{ l.amount_fmt }}</td>
+                    </tr>
+                    {% endfor %}
+                    <tr>
+                        <td style="font-weight:700;">{% if sac_codes %}SAC Code- {{ sac_codes }}{% endif %}</td>
+                        <td class="col-qty"></td><td class="col-rate"></td><td class="col-amt"></td>
+                    </tr>
+                    <tr class="subtotal-row">
+                        <td></td>
+                        <td class="col-qty">Sub Total</td>
+                        <td class="col-rate"></td>
+                        <td class="col-amt num">{{ subtotal_fmt }}</td>
+                    </tr>
+                    <tr class="spacer-row">
+                        <td></td><td class="col-qty"></td><td class="col-rate"></td><td class="col-amt"></td>
+                    </tr>
+                    <tr class="total-row">
+                        <td colspan="3" class="num" style="border-left:none;">Total :</td>
+                        <td class="col-amt num">{{ subtotal_fmt }}</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
-    </div>
 
-    <table class="lines">
-        <thead>
-            <tr>
-                <th>#</th><th>Parcel</th><th>Cargo</th><th>Service</th><th>SAC</th>
-                <th class="num">Qty</th><th>UoM</th><th class="num">Rate</th>
-                <th class="num">Amount</th><th class="num">CGST</th><th class="num">SGST</th>
-                <th class="num">IGST</th><th class="num">Total</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for l in lines %}
-            <tr>
-                <td>{{ loop.index }}</td>
-                <td>{{ l.parcel_no or '' }}</td>
-                <td>{{ l.cargo_name }}</td>
-                <td>{{ l.service_name }} ({{ l.service_code }})</td>
-                <td>{{ l.sac_code }}</td>
-                <td class="num">{{ '%.3f'|format(l.qty) }}</td>
-                <td>{{ l.uom }}</td>
-                <td class="num">{{ '%.2f'|format(l.rate) }}{% if not l.rate %} *{% endif %}</td>
-                <td class="num">{{ '%.2f'|format(l.amount) }}</td>
-                <td class="num">{{ '%.2f'|format(l.cgst_amount) }}</td>
-                <td class="num">{{ '%.2f'|format(l.sgst_amount) }}</td>
-                <td class="num">{{ '%.2f'|format(l.igst_amount) }}</td>
-                <td class="num">{{ '%.2f'|format(l.line_total) }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+        <div class="row words">{{ amount_words }}</div>
 
-    <div class="totals">
-        <div><span>Subtotal</span><b>₹ {{ '%.2f'|format(subtotal) }}</b></div>
-        <div><span>CGST</span><b>₹ {{ '%.2f'|format(cgst) }}</b></div>
-        <div><span>SGST</span><b>₹ {{ '%.2f'|format(sgst) }}</b></div>
-        <div><span>IGST</span><b>₹ {{ '%.2f'|format(igst) }}</b></div>
-        <div class="grand"><span>Total (Estimate)</span><span>₹ {{ '%.2f'|format(grand_total) }}</span></div>
-    </div>
-
-    <div class="disclaimer">
-        This pro forma invoice is an estimate issued before completion of cargo operations.
-        Quantities are as declared (BL/IGM); the final tax invoice will be raised on actual
-        quantities handled after LDUD closure and may differ.
-        {% if lines|selectattr('rate', 'equalto', 0)|list %}<br>* Rate not available from an
-        active agreement — shown as 0.00; to be confirmed.{% endif %}
+        <div class="row" style="border-bottom:none;">
+            {% if lines|selectattr('rate', 'equalto', 0)|list %}
+            <div class="rate-note">* One or more lines have no agreement rate (shown as 0.00) — amounts to be confirmed.</div>
+            {% endif %}
+            <div class="sign-block">
+                <div class="sign-inner">
+                    <div class="sign-line">Authorised Signatory</div>
+                </div>
+            </div>
+            <div class="gst-pan">
+                GSTIN:- {{ seller_gstin }}<br>
+                PAN : {{ seller_pan }}
+            </div>
+            <div class="pay-note">{{ payment_note }}</div>
+        </div>
     </div>
 </div>
 </body>
