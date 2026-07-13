@@ -120,10 +120,11 @@ def berth_plan_page():
 
 
 def get_report_window(plan_date_str):
-    """'As on <date> @ 07:00' covers the NEXT 24 hours: date 07:00 -> (date+1) 07:00."""
+    """'As on <date> @ 07:00' covers the PRIOR 24 hours:
+    (date-1) 07:00 -> date 07:00."""
     plan_date = datetime.strptime(plan_date_str, '%Y-%m-%d')
-    window_start = plan_date.replace(hour=7, minute=0, second=0, microsecond=0)
-    window_end = window_start + timedelta(days=1)
+    window_end = plan_date.replace(hour=7, minute=0, second=0, microsecond=0)
+    window_start = window_end - timedelta(days=1)
     return window_start, window_end
 
 
