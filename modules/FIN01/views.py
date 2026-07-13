@@ -230,6 +230,17 @@ def save_bill():
 
     data = request.json
 
+    # Approved/Invoiced bills are final — no edits, no revert to Draft
+    if data.get('id'):
+        conn = get_db()
+        cur = get_cursor(conn)
+        cur.execute('SELECT bill_status FROM bill_header WHERE id=%s', [data['id']])
+        row = cur.fetchone()
+        conn.close()
+        if row and row['bill_status'] in ('Approved', 'Invoiced'):
+            return jsonify({'success': False,
+                            'error': f"Bill is {row['bill_status']} — it is locked and cannot be modified"})
+
     # Extract lines from data before saving header (lines belong to bill_lines table, not bill_header)
     lines = data.pop('lines', [])
 
@@ -311,7 +322,11 @@ def save_bill():
 
 @bp.route('/api/module/FIN01/bill/generate', methods=['POST'])
 def bill_generate():
-    """Generate one bill across selected vessels from picked billable lines."""
+    """Generate the ACTUAL bill across selected vessels from picked billable
+    lines. Password-confirmed: the user re-enters their password and the bill
+    is born Approved (no Draft stage, not deletable). Only vessels whose
+    latest LDUD is Closed/Partial Close can be billed — earlier the customer
+    only gets a pro forma invoice."""
     if 'user_id' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'})
     perms = get_user_permissions(session['user_id'], 'FIN01')
@@ -325,16 +340,126 @@ def bill_generate():
     if any(float(l.get('rate') or 0) <= 0 for l in lines):
         return jsonify({'success': False, 'error': 'Every selected line needs a rate greater than 0'})
 
-    config = get_module_config('FIN01')
-    bill_status = 'Pending Approval' if config.get('approval_add') else 'Draft'
+    if not model.verify_user_password(session['user_id'], data.get('password')):
+        return jsonify({'success': False, 'error': 'Incorrect password — bill not generated'})
+
+    vcn_ids = sorted({l.get('vcn_id') for l in lines if l.get('vcn_id')})
+    unclosed = model.unclosed_vcn_docs(vcn_ids)
+    if unclosed:
+        return jsonify({'success': False,
+                        'error': 'LDUD not closed for: ' + ', '.join(unclosed) +
+                                 ' — only a pro forma invoice is available until closure'})
+
     try:
-        bill_id, bill_number = model.generate_bill(data, session.get('username'), bill_status)
+        bill_id, bill_number = model.generate_bill(
+            data, session.get('username'), 'Approved', approved_by=session.get('username'))
     except Exception as e:
         return jsonify({'success': False, 'error': 'Generate failed: ' + str(e)})
-
-    if bill_status == 'Pending Approval':
-        _queue_bill_approval_request(bill_id, bill_number, data.get('customer_name'), None)
     return jsonify({'success': True, 'id': bill_id, 'bill_number': bill_number})
+
+
+def _inr(n):
+    """Indian digit grouping: 305843 -> '3,05,843' (paise only when nonzero)."""
+    n = round(float(n or 0), 2)
+    neg = n < 0
+    n = abs(n)
+    r = int(n)
+    p = int(round((n - r) * 100))
+    s = str(r)
+    if len(s) > 3:
+        head, tail = s[:-3], s[-3:]
+        parts = []
+        while len(head) > 2:
+            parts.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            parts.insert(0, head)
+        s = ','.join(parts + [tail])
+    return ('-' if neg else '') + s + (f'.{p:02d}' if p else '')
+
+
+def _amount_in_words(amount):
+    """Indian-system words: 305843 -> 'Rupees Three Lakh Five Thousand ... Only'."""
+    ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
+            'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen',
+            'Seventeen', 'Eighteen', 'Nineteen']
+    tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety']
+
+    def words(n):
+        if n < 20:
+            return ones[n]
+        if n < 100:
+            return (tens[n // 10] + (' ' + ones[n % 10] if n % 10 else '')).strip()
+        if n < 1000:
+            return (ones[n // 100] + ' Hundred' + (' ' + words(n % 100) if n % 100 else '')).strip()
+        if n < 100000:
+            return (words(n // 1000) + ' Thousand' + (' ' + words(n % 1000) if n % 1000 else '')).strip()
+        if n < 10000000:
+            return (words(n // 100000) + ' Lakh' + (' ' + words(n % 100000) if n % 100000 else '')).strip()
+        return (words(n // 10000000) + ' Crore' + (' ' + words(n % 10000000) if n % 10000000 else '')).strip()
+
+    total = int(round(float(amount or 0)))
+    return 'Rupees ' + (words(total) or 'Zero') + ' Only.'
+
+
+# JJLTPL stationery constants — overridable via FIN01 module config keys of the
+# same name if these ever change.
+_PI_GSTIN = '27AAGCJ3665D1ZK'
+_PI_PAN = 'AAGCJ3665D'
+_PI_PAYMENT_NOTE = ('Note : Payment to be made through DD / Bankers Cheque/RTGS drawn in favour of '
+                    'JSW JNPT LIQUID TERMINAL PRIVATE LIMITED, (Axis Bank Ltd- Kalina Branch, '
+                    'Mumbai – 400098, Escrow Account- 924020046923953, IFS CODE- UTIB0000776)')
+
+
+@bp.route('/module/FIN01/proforma/<customer_type>/<int:customer_id>/<int:vcn_id>')
+def proforma_invoice(customer_type, customer_id, vcn_id):
+    """Printable PRO-FORMA invoice for one vessel (JJLTPL letterhead format) —
+    declared/BL quantities at agreement rates, no GST (matches the manual
+    pro forma issued today). Display document only: nothing persisted."""
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    billables = model.get_customer_billables(customer_type, customer_id)
+    vessel = next((v for v in (billables.get('vessels') or []) if v['vcn_id'] == vcn_id), None)
+    if not vessel or not vessel['lines']:
+        return "No billable lines found for this vessel/customer.", 404
+
+    conn = get_db()
+    cur = get_cursor(conn)
+    tbl = 'vessel_customers' if customer_type == 'Customer' else 'vessel_agents'
+    cur.execute(f'''SELECT name, gstin, billing_address, city, pincode
+                    FROM {tbl} WHERE id=%s''', [customer_id])
+    cust = dict(cur.fetchone() or {})
+    conn.close()
+
+    lines, subtotal = [], 0.0
+    for l in vessel['lines']:
+        amount = round(float(l['qty']) * float(l['rate'] or 0), 2)
+        lines.append({**l, 'amount': amount, 'amount_fmt': _inr(amount),
+                      'qty_fmt': f"{float(l['qty']):.3f}".rstrip('0').rstrip('.'),
+                      'rate_fmt': f"{float(l['rate'] or 0):.2f}"})
+        subtotal += amount
+    subtotal = round(subtotal, 2)
+    sac_codes = sorted({l['sac_code'] for l in vessel['lines'] if l.get('sac_code')})
+
+    from datetime import datetime
+    now = datetime.now()
+    fy = (f'{now.year % 100}-{(now.year + 1) % 100:02d}' if now.month >= 4
+          else f'{(now.year - 1) % 100}-{now.year % 100:02d}')
+    # ponytail: ref derives from the VCN doc num (stateless); add a numbered
+    # pro forma register if finance wants sequential PI numbers
+    ref_no = f"JJLTPL/PI/{fy}/{vessel['vcn_doc_num']}"
+
+    config = get_module_config('FIN01')
+    return render_template('proforma_print.html',
+                           vessel=vessel, lines=lines, customer=cust,
+                           ref_no=ref_no, date_str=now.strftime('%d.%m.%Y'),
+                           sac_codes=', '.join(sac_codes),
+                           subtotal_fmt=_inr(subtotal),
+                           amount_words=_amount_in_words(subtotal),
+                           seller_gstin=config.get('seller_gstin') or _PI_GSTIN,
+                           seller_pan=config.get('seller_pan') or _PI_PAN,
+                           payment_note=config.get('payment_note') or _PI_PAYMENT_NOTE)
 
 
 @bp.route('/api/module/FIN01/bill/approve', methods=['POST'])

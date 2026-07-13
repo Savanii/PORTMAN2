@@ -251,30 +251,51 @@ async function loadBillables() {
 function renderVessels(vessels) {
     const root = document.getElementById('billablesRoot'); // container that held cargo cards
     if (!vessels.length) { root.innerHTML = '<div class="empty-state">No billable vessels for this customer.</div>'; return; }
-    root.innerHTML = vessels.map((v, vi) => `
-        <div class="vessel-card" data-vcn="${v.vcn_id}">
-          <div class="vessel-head collapsible-header" onclick="toggleVessel(${vi})">
-            <span class="toggle-icon" id="vic-${vi}">▸</span>
-            <b>${v.vcn_doc_num}</b> · ${v.vessel_name || ''}
-            <span class="ldud-badge">LDUD: ${v.ldud_status}</span>
-            <span style="margin-left:auto;font-weight:600;">Billable: ₹${(v.total_amount||0).toFixed(2)}</span>
-          </div>
-          <div class="vessel-body" id="vb-${vi}" style="display:none;">
-            <table class="data-table"><thead><tr>
-              <th></th><th>Parcel</th><th>Cargo</th><th>Service</th><th>Qty</th><th>Rate</th><th>Amount</th>
-            </tr></thead><tbody>
-            ${v.lines.map((l, li) => `
+    const ct = document.getElementById('customerType').value;
+    const cid = document.getElementById('customerId').value;
+    root.innerHTML = vessels.map((v, vi) => {
+        const actual = v.stage === 'actual';
+        const badge = actual
+            ? `<span class="ldud-badge" style="background:#d1fae5;color:#065f46;">ACTUAL · LDUD ${v.ldud_status}</span>`
+            : `<span class="ldud-badge" style="background:#fef3c7;color:#92400e;">PRO FORMA · LDUD ${v.ldud_status || 'Open'}</span>`;
+        const proformaBtn = `<button class="btn btn-primary" style="font-size:10px;padding:3px 10px;"
+            onclick="event.stopPropagation();window.open('/module/FIN01/proforma/${ct}/${cid}/${v.vcn_id}','_blank')">🖨 Pro Forma Invoice</button>`;
+        const rows = v.lines.map((l, li) => actual ? `
               <tr>
                 <td><input type="checkbox" class="bl-chk" data-vi="${vi}" data-li="${li}" ${l.rate>0?'checked':''} onchange="recalcSel()"></td>
                 <td>${l.parcel_no||''}</td><td>${l.cargo_name||''}</td>
                 <td>${l.service_name} <small>(${l.service_code})</small></td>
-                <td style="text-align:right"><input type="number" class="bl-qty" data-vi="${vi}" data-li="${li}" value="${l.qty}" max="${l.qty}" step="0.001" style="width:80px" onchange="clampQty(this,${l.qty});recalcSel()"> ${l.uom}</td>
+                <td style="text-align:right">${(+l.declared_qty || 0).toFixed(3)}</td>
+                <td style="text-align:right"><input type="number" class="bl-qty" data-vi="${vi}" data-li="${li}" value="${l.qty}" max="${l.qty}" step="0.001" style="width:80px" onchange="clampQty(this,${l.qty});recalcSel()"> ${l.uom}
+                    ${l.actual_qty === null ? '<br><span style="color:#c05621;font-size:9px">no LUEU01 log — BL qty used</span>' : ''}</td>
                 <td style="text-align:right"><input type="number" class="bl-rate" data-vi="${vi}" data-li="${li}" value="${l.rate||''}" step="0.01" placeholder="0.00" style="width:80px" onchange="recalcSel()">${l.rate>0?'':' <span style="color:#dc2626;font-size:10px">enter rate</span>'}</td>
                 <td style="text-align:right" id="amt-${vi}-${li}">₹${(l.amount||0).toFixed(2)}</td>
-              </tr>`).join('')}
-            </tbody></table>
+              </tr>` : `
+              <tr>
+                <td>${l.parcel_no||''}</td><td>${l.cargo_name||''}</td>
+                <td>${l.service_name} <small>(${l.service_code})</small></td>
+                <td style="text-align:right">${(+l.qty).toFixed(3)} ${l.uom}</td>
+                <td style="text-align:right">${l.rate>0 ? (+l.rate).toFixed(2) : '<span style="color:#dc2626;font-size:10px">no agreement rate</span>'}</td>
+                <td style="text-align:right">₹${(l.amount||0).toFixed(2)}</td>
+              </tr>`).join('');
+        const head = actual
+            ? '<th></th><th>Parcel</th><th>Cargo</th><th>Service</th><th>BL Qty</th><th>Actual Qty (LUEU01)</th><th>Rate</th><th>Amount</th>'
+            : '<th>Parcel</th><th>Cargo</th><th>Service</th><th>Declared Qty</th><th>Rate</th><th>Amount</th>';
+        return `
+        <div class="vessel-card" data-vcn="${v.vcn_id}">
+          <div class="vessel-head collapsible-header" onclick="toggleVessel(${vi})">
+            <span class="toggle-icon" id="vic-${vi}">▸</span>
+            <b>${v.vcn_doc_num}</b> · ${v.vessel_name || ''}
+            ${badge}
+            ${proformaBtn}
+            <span style="margin-left:auto;font-weight:600;">${actual ? 'Billable' : 'Estimated'}: ₹${(v.total_amount||0).toFixed(2)}</span>
           </div>
-        </div>`).join('');
+          <div class="vessel-body" id="vb-${vi}" style="display:none;">
+            ${actual ? '' : '<div style="font-size:11px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:6px 10px;margin-bottom:6px;">VCN approved, LDUD not yet closed — pro forma invoice only. The actual bill unlocks after LDUD closure with LUEU01 handled quantities.</div>'}
+            <table class="data-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>
+          </div>
+        </div>`;
+    }).join('');
     window._vessels = vessels;
     recalcSel();
 }
@@ -302,7 +323,7 @@ function recalcSel() {
     const el = document.getElementById('selectedTotal'); if (el) el.textContent = '₹'+sel.toFixed(2);
 }
 
-async function generateBill() {
+function generateBill() {
     const vessels = window._vessels || [];
     const picked = [];
     document.querySelectorAll('.bl-chk:checked').forEach(chk => {
@@ -329,21 +350,40 @@ async function generateBill() {
     const cid = cidSel.value;
     const opt = cidSel.selectedOptions && cidSel.selectedOptions[0];
 
-    const payload = {
+    window._pendingBill = {
         customer_type: ct, customer_id: cid, customer_name: (opt ? opt.dataset.name : '') || '',
         customer_gstin: (opt ? opt.dataset.gstin : '') || '',
         customer_gst_state_code: (opt ? opt.dataset.stateCode : '') || '',
         customer_gl_code: '',
         lines: picked,
     };
-    const res = await fetch('/api/module/FIN01/bill/generate', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload),
-    });
-    const j = await res.json();
-    if (!j.success) { alert(j.error || 'Bill generation failed'); return; }
-    alert('Bill ' + j.bill_number + ' generated.');
-    loadBillables();   // reload; billed lines drop out via ledger remaining
+    // final bill is born Approved — the user re-authenticates to sign it off
+    document.getElementById('pwdInput').value = '';
+    document.getElementById('pwdError').textContent = '';
+    document.getElementById('pwdModal').style.display = 'flex';
+    document.getElementById('pwdInput').focus();
+}
+
+async function confirmGenerateBill() {
+    const pwd = document.getElementById('pwdInput').value;
+    const errEl = document.getElementById('pwdError');
+    if (!pwd) { errEl.textContent = 'Enter your password.'; return; }
+    const payload = { ...window._pendingBill, password: pwd };
+    const btn = document.getElementById('pwdConfirmBtn');
+    btn.disabled = true; btn.textContent = 'Generating…';
+    try {
+        const res = await fetch('/api/module/FIN01/bill/generate', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const j = await res.json();
+        if (!j.success) { errEl.textContent = j.error || 'Bill generation failed'; return; }
+        document.getElementById('pwdModal').style.display = 'none';
+        alert('Bill ' + j.bill_number + ' generated and APPROVED. It is now locked (no draft/delete).');
+        loadBillables();   // reload; billed lines drop out via ledger remaining
+    } finally {
+        btn.disabled = false; btn.textContent = '✓ Confirm & Generate';
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -376,6 +416,28 @@ async function viewProofDocs(sourceModule, sourceId) {
     `).join('');
 }
 </script>
+
+<!-- Password confirmation modal — actual bill is approved on generation -->
+<div id="pwdModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99999;align-items:center;justify-content:center;">
+    <div style="background:white;border-radius:8px;padding:24px;max-width:420px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,0.3);">
+        <h3 style="margin:0 0 8px;font-size:16px;font-weight:600;">🔒 Confirm Bill Generation</h3>
+        <p style="font-size:12px;color:#4a5568;margin:0 0 14px;">
+            You are generating the <b>final bill on actual handled quantities</b>.
+            It will be created as <b>Approved</b> and locked — it cannot be reverted
+            to draft or deleted. Enter your password to confirm.
+        </p>
+        <input type="password" id="pwdInput" placeholder="Your login password" autocomplete="current-password"
+               style="width:100%;box-sizing:border-box;padding:8px;font-size:13px;border:1px solid #cbd5e0;border-radius:4px;"
+               onkeydown="if(event.key==='Enter')confirmGenerateBill()">
+        <div id="pwdError" style="color:#e53e3e;font-size:12px;min-height:16px;margin-top:6px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+            <button onclick="document.getElementById('pwdModal').style.display='none'"
+                    style="padding:8px 16px;background:#e2e8f0;border:none;border-radius:4px;cursor:pointer;font-size:13px;">Cancel</button>
+            <button id="pwdConfirmBtn" onclick="confirmGenerateBill()"
+                    style="padding:8px 18px;background:#27ae60;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">✓ Confirm &amp; Generate</button>
+        </div>
+    </div>
+</div>
 
 <!-- Proof Docs Viewer Modal -->
 <div id="proofDocsModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99999;align-items:center;justify-content:center;">

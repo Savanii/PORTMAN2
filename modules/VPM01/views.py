@@ -1,5 +1,6 @@
-from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for
+from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, Response
 from functools import wraps
+import csv, io
 from . import model
 from database import get_user_permissions
 
@@ -61,3 +62,33 @@ def delete():
         return jsonify({'error': 'No permission to delete'}), 403
     model.delete_data(request.json.get('id'))
     return jsonify({'success': True})
+
+@bp.route('/api/module/VPM01/template')
+@login_required
+def download_template():
+    si = io.StringIO()
+    writer = csv.writer(si)
+    writer.writerow(['Port Code', 'Port Name'])
+    return Response(si.getvalue(), mimetype='text/csv',
+                    headers={'Content-Disposition': 'attachment; filename=VPM01_Template.csv'})
+
+@bp.route('/api/module/VPM01/bulk_upload', methods=['POST'])
+@login_required
+def bulk_upload():
+    perms = get_perms()
+    if not perms.get('can_add'):
+        return jsonify({'error': 'No permission to add'}), 403
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': 'No file uploaded'}), 400
+    stream = io.StringIO(file.stream.read().decode('utf-8-sig'))
+    reader = csv.DictReader(stream)
+    rows = []
+    field_map = {'Port Code': 'port_code', 'Port Name': 'name'}
+    for r in reader:
+        row = {}
+        for csv_col, db_col in field_map.items():
+            row[db_col] = (r.get(csv_col) or '').strip()
+        rows.append(row)
+    inserted = model.bulk_insert(rows)
+    return jsonify({'success': True, 'inserted': inserted})

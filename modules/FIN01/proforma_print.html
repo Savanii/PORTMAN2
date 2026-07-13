@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pro Forma Invoice — {{ vessel.vcn_doc_num }}</title>
+<style>
+    body { font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #222; margin: 24px; }
+    .doc { max-width: 900px; margin: 0 auto; border: 1px solid #ccc; padding: 24px; }
+    .doc-title { text-align: center; font-size: 20px; font-weight: 800; letter-spacing: 2px; margin-bottom: 2px; }
+    .doc-subtitle { text-align: center; color: #b91c1c; font-size: 11px; font-weight: 600; margin-bottom: 18px; }
+    .head-grid { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 14px; }
+    .head-block { flex: 1; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px; }
+    .head-block h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; color: #6b7280; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+    .head-block div { margin: 2px 0; }
+    table.lines { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    table.lines th { background: #f3f4f6; border: 1px solid #d1d5db; padding: 6px; font-size: 10px; text-transform: uppercase; }
+    table.lines td { border: 1px solid #d1d5db; padding: 6px; }
+    .num { text-align: right; }
+    .totals { margin-top: 12px; margin-left: auto; width: 320px; }
+    .totals div { display: flex; justify-content: space-between; padding: 3px 8px; }
+    .totals .grand { font-weight: 800; font-size: 14px; border-top: 2px solid #222; margin-top: 4px; padding-top: 6px; }
+    .disclaimer { margin-top: 18px; font-size: 10px; color: #6b7280; border-top: 1px dashed #d1d5db; padding-top: 8px; }
+    .print-btn { position: fixed; top: 12px; right: 12px; padding: 8px 18px; background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    @media print { .print-btn { display: none; } body { margin: 0; } .doc { border: none; } }
+</style>
+</head>
+<body>
+<button class="print-btn" onclick="window.print()">🖨 Print</button>
+<div class="doc">
+    <div class="doc-title">PRO FORMA INVOICE</div>
+    <div class="doc-subtitle">NOT A TAX INVOICE — estimate based on declared / BL quantities</div>
+
+    <div class="head-grid">
+        <div class="head-block">
+            <h4>From</h4>
+            <div><b>{{ seller.legal_name }}</b></div>
+            <div>{{ seller.address }}</div>
+            <div>{{ seller.location }} {{ ('- ' ~ seller.pincode) if seller.pincode else '' }}</div>
+            {% if seller.gstin %}<div>GSTIN: {{ seller.gstin }}</div>{% endif %}
+            {% if seller.phone %}<div>Ph: {{ seller.phone }}</div>{% endif %}
+            {% if seller.email %}<div>{{ seller.email }}</div>{% endif %}
+        </div>
+        <div class="head-block">
+            <h4>To ({{ customer_type }})</h4>
+            <div><b>{{ customer.name }}</b></div>
+            {% if customer.billing_address %}<div>{{ customer.billing_address }}</div>{% endif %}
+            <div>{{ customer.city or '' }} {{ ('- ' ~ customer.pincode) if customer.pincode else '' }}</div>
+            {% if customer.gstin %}<div>GSTIN: {{ customer.gstin }}</div>{% endif %}
+        </div>
+        <div class="head-block">
+            <h4>Vessel</h4>
+            <div><b>{{ vessel.vessel_name or '' }}</b></div>
+            <div>VCN: {{ vessel.vcn_doc_num }}</div>
+            <div>LDUD Status: {{ vessel.ldud_status or 'Open' }}</div>
+            <div>Date: {{ print_date }}</div>
+        </div>
+    </div>
+
+    <table class="lines">
+        <thead>
+            <tr>
+                <th>#</th><th>Parcel</th><th>Cargo</th><th>Service</th><th>SAC</th>
+                <th class="num">Qty</th><th>UoM</th><th class="num">Rate</th>
+                <th class="num">Amount</th><th class="num">CGST</th><th class="num">SGST</th>
+                <th class="num">IGST</th><th class="num">Total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for l in lines %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ l.parcel_no or '' }}</td>
+                <td>{{ l.cargo_name }}</td>
+                <td>{{ l.service_name }} ({{ l.service_code }})</td>
+                <td>{{ l.sac_code }}</td>
+                <td class="num">{{ '%.3f'|format(l.qty) }}</td>
+                <td>{{ l.uom }}</td>
+                <td class="num">{{ '%.2f'|format(l.rate) }}{% if not l.rate %} *{% endif %}</td>
+                <td class="num">{{ '%.2f'|format(l.amount) }}</td>
+                <td class="num">{{ '%.2f'|format(l.cgst_amount) }}</td>
+                <td class="num">{{ '%.2f'|format(l.sgst_amount) }}</td>
+                <td class="num">{{ '%.2f'|format(l.igst_amount) }}</td>
+                <td class="num">{{ '%.2f'|format(l.line_total) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="totals">
+        <div><span>Subtotal</span><b>₹ {{ '%.2f'|format(subtotal) }}</b></div>
+        <div><span>CGST</span><b>₹ {{ '%.2f'|format(cgst) }}</b></div>
+        <div><span>SGST</span><b>₹ {{ '%.2f'|format(sgst) }}</b></div>
+        <div><span>IGST</span><b>₹ {{ '%.2f'|format(igst) }}</b></div>
+        <div class="grand"><span>Total (Estimate)</span><span>₹ {{ '%.2f'|format(grand_total) }}</span></div>
+    </div>
+
+    <div class="disclaimer">
+        This pro forma invoice is an estimate issued before completion of cargo operations.
+        Quantities are as declared (BL/IGM); the final tax invoice will be raised on actual
+        quantities handled after LDUD closure and may differ.
+        {% if lines|selectattr('rate', 'equalto', 0)|list %}<br>* Rate not available from an
+        active agreement — shown as 0.00; to be confirmed.{% endif %}
+    </div>
+</div>
+</body>
+</html>
