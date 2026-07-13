@@ -355,6 +355,10 @@ def get_berthed_vessels(window_start, window_end, berths):
         row['terminal'] = h['exp_terminal'] if h['operation_type'] == 'Export' else h['imp_terminal']
         row['pipeline'] = h['exp_pipeline'] if h['operation_type'] == 'Export' else h['imp_pipeline']
         row.update(_enrich_vessel(cur, h['vcn_id'], h['ldud_id'], window_start, window_end))
+        # Do not show completed vessels in Berthed section
+        balance = row.get('balance')
+        if balance is not None and float(balance) <= 0:
+            continue
         out.append(row)
     conn.close()
     return out
