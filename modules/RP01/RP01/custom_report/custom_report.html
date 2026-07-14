@@ -545,6 +545,7 @@ td.pvtAxisContainer.pvtCols::before {
         <label for="src-sel">Data Source</label>
         <select id="src-sel" onchange="onSourceChange()">
             <option value="vessel-calls">Vessel Calls (Historical + Live)</option>
+            <option value="mis-history">MIS Parcel Lines (Historical + Live)</option>
         </select>
     </div>
     <div class="toolbar-group">
@@ -647,6 +648,11 @@ const DATE_COLS = {
         filterable: [
             { key: 'nor',              label: 'NOR' },
             { key: 'cargo_completion', label: 'Cargo Completion' },
+        ],
+    },
+    'mis-history': {
+        filterable: [
+            { key: 'period', label: 'Month / NOR' },
         ],
     },
 };
@@ -1321,6 +1327,7 @@ function setStatus(msg, isErr) {
 function srcLabel(s) {
     return {
         'vessel-calls': 'Vessel Calls (Historical + Live)',
+        'mis-history':  'MIS Parcel Lines (Historical + Live)',
     }[s] || s;
 }
 function esc(s) {
