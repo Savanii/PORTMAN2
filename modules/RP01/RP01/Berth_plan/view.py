@@ -70,8 +70,7 @@ def get_expected_waiting_vessels(window_start, window_end):
                 parcels.terminal_name,
                 parcels.total_quantity AS cargo_quantity,
                 parcels.equipment_names,
-                parcels.consigner_names,
-                ldud.nor_tendered
+                parcels.consigner_names
             FROM vcn_header vh
             LEFT JOIN LATERAL (
                 SELECT
@@ -87,19 +86,11 @@ def get_expected_waiting_vessels(window_start, window_end):
                     FROM vcn_export_cargo_declaration WHERE vcn_id = vh.id
                 ) p
             ) AS parcels ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT nor_tendered
-                FROM ldud_header l
-                WHERE l.vcn_id = vh.id
-                ORDER BY l.id DESC
-                LIMIT 1
-            ) AS ldud ON TRUE
             WHERE
-                vh.doc_status = 'Approved'
-              AND EXISTS (
-                  SELECT 1 FROM ldud_header l
-                  WHERE l.vcn_id = vh.id
-              )
+                EXISTS (
+                    SELECT 1 FROM ldud_header l
+                    WHERE l.vcn_id = vh.id
+                )
               AND NOT EXISTS (
                   SELECT 1 FROM ldud_header l
                   WHERE l.vcn_id = vh.id
@@ -111,11 +102,9 @@ def get_expected_waiting_vessels(window_start, window_end):
         rows = [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
-
     def _combine(r):
         parts = [r.get('agents'), r.get('consigner_names')]
         return ' / '.join(p for p in parts if p)
-
     out = []
     for r in rows:
         out.append({
@@ -132,7 +121,7 @@ def get_expected_waiting_vessels(window_start, window_end):
             'ata':          '',
             'lpc':          '',
             'doc':          _fmt_dt(r.get('doc_date')),
-            'nor':          _fmt_dt(r.get('nor_tendered')),
+            'nor':          '',
             'berth':        r.get('berth_name'),
         })
     return out
