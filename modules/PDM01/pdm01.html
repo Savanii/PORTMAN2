@@ -36,7 +36,8 @@
                 {title: "Delay Name", field: "name", editor: canEdit ? "input" : false, widthGrow: 2},
                 {title: "To SOF", field: "to_sof", editor: canEdit ? "list" : false, width: 100,
                     editorParams: {values: {"Yes": "Yes", "No": "No"}, allowEmpty: true}},
-                {title: "Type", field: "type", editor: canEdit ? "input" : false, widthGrow: 1}
+                {title: "Type", field: "type", editor: canEdit ? "list" : false, width: 120,
+                    editorParams: {values: {"Port": "Port", "Non Port": "Non Port"}, allowEmpty: true}}
             ],
             pagination: true,
             paginationMode: "remote",
