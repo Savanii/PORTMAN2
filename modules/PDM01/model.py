@@ -27,11 +27,20 @@ def save_data(data):
     name = data.get('name', '')
     to_sof = data.get('to_sof', '')
     dtype = data.get('type', '')
+    type_2 = data.get('type_2', '')
+    type_3 = data.get('type_3', '')
+    type_4 = data.get('type_4', '')
 
     if row_id:
-        cur.execute(f"UPDATE {TABLE} SET name=%s, to_sof=%s, type=%s WHERE id=%s", [name, to_sof, dtype, row_id])
+        cur.execute(
+            f"UPDATE {TABLE} SET name=%s, to_sof=%s, type=%s, type_2=%s, type_3=%s, type_4=%s WHERE id=%s",
+            [name, to_sof, dtype, type_2, type_3, type_4, row_id],
+        )
     else:
-        cur.execute(f"INSERT INTO {TABLE} (name, to_sof, type) VALUES (%s, %s, %s) RETURNING id", [name, to_sof, dtype])
+        cur.execute(
+            f"INSERT INTO {TABLE} (name, to_sof, type, type_2, type_3, type_4) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            [name, to_sof, dtype, type_2, type_3, type_4],
+        )
         row_id = cur.fetchone()['id']
 
     conn.commit()
@@ -45,8 +54,13 @@ def bulk_insert(rows):
     for row in rows:
         if not row.get('name'):
             continue
-        cur.execute(f"INSERT INTO {TABLE} (name, to_sof, type) VALUES (%s, %s, %s)",
-                   [row.get('name', ''), row.get('to_sof', ''), row.get('type', '')])
+        cur.execute(
+            f"INSERT INTO {TABLE} (name, to_sof, type, type_2, type_3, type_4) VALUES (%s, %s, %s, %s, %s, %s)",
+            [
+                row.get('name', ''), row.get('to_sof', ''), row.get('type', ''),
+                row.get('type_2', ''), row.get('type_3', ''), row.get('type_4', ''),
+            ],
+        )
         inserted += 1
     conn.commit()
     conn.close()

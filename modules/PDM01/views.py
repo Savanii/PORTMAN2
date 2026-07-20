@@ -68,7 +68,7 @@ def delete():
 def download_template():
     si = io.StringIO()
     writer = csv.writer(si)
-    writer.writerow(['Delay Name', 'To SOF', 'Type'])
+    writer.writerow(['Delay Name', 'To SOF', 'Type', 'Type 2', 'Type 3', 'Type 4'])
     return Response(si.getvalue(), mimetype='text/csv',
                     headers={'Content-Disposition': 'attachment; filename=PDM01_Template.csv'})
 
@@ -84,7 +84,10 @@ def bulk_upload():
     stream = io.StringIO(file.stream.read().decode('utf-8-sig'))
     reader = csv.DictReader(stream)
     rows = []
-    field_map = {'Delay Name': 'name', 'To SOF': 'to_sof', 'Type': 'type'}
+    field_map = {
+        'Delay Name': 'name', 'To SOF': 'to_sof', 'Type': 'type', 'Type 2': 'type_2',
+        'Type 3': 'type_3', 'Type 4': 'type_4',
+    }
     for r in reader:
         row = {}
         for csv_col, db_col in field_map.items():
