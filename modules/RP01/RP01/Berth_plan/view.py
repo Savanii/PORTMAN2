@@ -352,8 +352,6 @@ def _base_row(h):
         'remarks': '',
     }
 
-
-
 def get_berthed_vessels(window_start, window_end, berths):
     conn = get_db()
     cur = get_cursor(conn)
@@ -382,9 +380,18 @@ def get_berthed_vessels(window_start, window_end, berths):
                 OR NULLIF(TRIM(l.{SAIL_COLUMN}::text), '') IS NULL
                 OR (NULLIF(l.{SAIL_COLUMN}::text, ''))::timestamp >= %s
               )
-        ORDER BY h.berth_name
+        ORDER BY h.berth_name, l.alongside_datetime DESC
     ''', [berths, window_end, window_start])
     headers = [dict(r) for r in cur.fetchall()]
+
+    # ===== Keep only the LATEST vessel per berth (a berth can physically =====
+    # ===== hold just one vessel — dedupe any stale/overlapping records) =====
+    latest_per_berth = {}
+    for h in headers:
+        b = h['berth_name']
+        if b not in latest_per_berth:
+            latest_per_berth[b] = h  # first row per berth = latest, thanks to ORDER BY above
+    headers = list(latest_per_berth.values())
 
     out = []
     for h in headers:
@@ -394,14 +401,14 @@ def get_berthed_vessels(window_start, window_end, berths):
         row['terminal'] = h['exp_terminal'] if h['operation_type'] == 'Export' else h['imp_terminal']
         row['pipeline'] = h['exp_pipeline'] if h['operation_type'] == 'Export' else h['imp_pipeline']
         row.update(_enrich_vessel(cur, h['vcn_id'], h['ldud_id'], window_start, window_end))
-        # Do not show completed vessels in Berthed section
+        # Only show vessels currently under discharge (balance > 0);
+        # completed vessels and stale duplicates are excluded
         balance = row.get('balance')
         if balance is not None and float(balance) <= 0:
             continue
         out.append(row)
     conn.close()
     return out
-
 
 # def get_berthed_vessels(window_start, window_end, berths):
 #     conn = get_db()
@@ -422,12 +429,17 @@ def get_berthed_vessels(window_start, window_end, berths):
 #                  WHERE cn.vcn_id = h.id LIMIT 1) AS imp_pipeline
 #         FROM ldud_header l
 #         JOIN vcn_header h ON h.id = l.vcn_id
-#         LEFT JOIN vessels v ON v.vessel_name = h.vessel_name
+#         LEFT JOIN vessels v ON UPPER(TRIM(v.vessel_name)) = UPPER(TRIM(h.vessel_name))
 #         WHERE h.berth_name = ANY(%s)
 #           AND l.alongside_datetime IS NOT NULL
-#           AND (l.{SAIL_COLUMN} IS NULL OR NULLIF(TRIM(l.{SAIL_COLUMN}::text), '') IS NULL)
+#           AND (NULLIF(l.alongside_datetime::text, ''))::timestamp < %s
+#           AND (
+#                 l.{SAIL_COLUMN} IS NULL
+#                 OR NULLIF(TRIM(l.{SAIL_COLUMN}::text), '') IS NULL
+#                 OR (NULLIF(l.{SAIL_COLUMN}::text, ''))::timestamp >= %s
+#               )
 #         ORDER BY h.berth_name
-#     ''', [berths])
+#     ''', [berths, window_end, window_start])
 #     headers = [dict(r) for r in cur.fetchall()]
 
 #     out = []
@@ -438,9 +450,16 @@ def get_berthed_vessels(window_start, window_end, berths):
 #         row['terminal'] = h['exp_terminal'] if h['operation_type'] == 'Export' else h['imp_terminal']
 #         row['pipeline'] = h['exp_pipeline'] if h['operation_type'] == 'Export' else h['imp_pipeline']
 #         row.update(_enrich_vessel(cur, h['vcn_id'], h['ldud_id'], window_start, window_end))
+#         # Do not show completed vessels in Berthed section
+#         balance = row.get('balance')
+#         if balance is not None and float(balance) <= 0:
+#             continue
 #         out.append(row)
 #     conn.close()
 #     return out
+
+
+
 
 def get_sailed_vessels(window_start, window_end, berths):
     conn = get_db()
