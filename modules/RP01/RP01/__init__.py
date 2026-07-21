@@ -2,7 +2,7 @@ print("LOADED:", __file__)
 
 from flask import Blueprint
 
-MODULE_CODE = 'RP01'
+MODULE_CODE = "RP01"
 MODULE_INFO = {
     "code": MODULE_CODE,
     "name": "Reports"
@@ -14,12 +14,15 @@ bp = Blueprint(
     template_folder="."
 )
 
-# Import each sub-module's views AFTER bp is defined, so their
-# `from .. import bp` (or `from . import bp`) finds it already built.
+# Import after blueprint creation
 from . import views
 from .JJLTPL import jjltpl
 from .report1 import report1
 from .report2 import report2
+from .report_06 import views as report_06_views
 from .Berth_plan import view as berth_plan_view
 from .report4 import report4
 
+from .custom_report import views as custom_report_views
+from .report_08 import report8 as report_08_views
+from .report9 import report09 as report_09_views
