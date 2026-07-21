@@ -369,16 +369,20 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
             SELECT
                 lh.vessel_name,
                 lh.cast_off_datetime,
-                lh.operation_type,
-                lpo.cargo_name,
-                COALESCE(lul.quantity, 0) AS quantity
+                LOWER(TRIM(lh.operation_type)) AS operation_type,
+                MAX(lpo.cargo_name) AS cargo_name,
+                SUM(COALESCE(lul.quantity,0)) AS quantity
             FROM ldud_header lh
             JOIN ldud_parcel_ops lpo
                 ON lpo.ldud_id = lh.id
             JOIN lueu_parcel_log lul
                 ON lul.parcel_op_id = lpo.id
             WHERE lh.vessel_name IS NOT NULL
-              AND (lul.is_deleted IS NULL OR lul.is_deleted = FALSE)
+            AND (lul.is_deleted IS NULL OR lul.is_deleted = FALSE)
+            GROUP BY
+                lh.vessel_name,
+                lh.cast_off_datetime,
+                LOWER(TRIM(lh.operation_type))
         """)
 
         rows = cur.fetchall()
