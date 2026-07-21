@@ -566,12 +566,18 @@ def load_data() -> pd.DataFrame:
 
     # ---- which (fin_year, fy_month_idx) periods does mis_vessel_master
     # actually cover? Only periods with ZERO rows there fall back. ----
-    covered_periods = set(zip(mv_df["fin_year"], mv_df["fy_month_idx"]))
-
+    # Load live data only from July 2026 onwards
     live_df = _load_live_pipeline_data()
+
     if not live_df.empty:
         live_df = live_df[
-            ~live_df.apply(lambda r: (r["fin_year"], r["fy_month_idx"]) in covered_periods, axis=1)
+            (
+                (live_df["fin_year"] > "2026-27")
+            ) |
+            (
+                (live_df["fin_year"] == "2026-27") &
+                (live_df["fy_month_idx"] >= 3)
+            )
         ]
 
     df = pd.concat([mv_df, live_df], ignore_index=True)
