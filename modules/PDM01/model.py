@@ -25,13 +25,28 @@ def save_data(data):
     cur = get_cursor(conn)
     row_id = data.get('id')
     name = data.get('name', '')
+    description = data.get('description', '')
     to_sof = data.get('to_sof', '')
     dtype = data.get('type', '')
+    delay_type = data.get('delay_type', '')
+    particular = data.get('particular', '')
+    responsibility = data.get('responsibility', '')
 
     if row_id:
-        cur.execute(f"UPDATE {TABLE} SET name=%s, to_sof=%s, type=%s WHERE id=%s", [name, to_sof, dtype, row_id])
+        cur.execute(
+            f"""UPDATE {TABLE}
+                SET name=%s, description=%s, to_sof=%s, type=%s,
+                    delay_type=%s, particular=%s, responsibility=%s
+                WHERE id=%s""",
+            [name, description, to_sof, dtype, delay_type, particular, responsibility, row_id],
+        )
     else:
-        cur.execute(f"INSERT INTO {TABLE} (name, to_sof, type) VALUES (%s, %s, %s) RETURNING id", [name, to_sof, dtype])
+        cur.execute(
+            f"""INSERT INTO {TABLE}
+                (name, description, to_sof, type, delay_type, particular, responsibility)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            [name, description, to_sof, dtype, delay_type, particular, responsibility],
+        )
         row_id = cur.fetchone()['id']
 
     conn.commit()
@@ -45,8 +60,16 @@ def bulk_insert(rows):
     for row in rows:
         if not row.get('name'):
             continue
-        cur.execute(f"INSERT INTO {TABLE} (name, to_sof, type) VALUES (%s, %s, %s)",
-                   [row.get('name', ''), row.get('to_sof', ''), row.get('type', '')])
+        cur.execute(
+            f"""INSERT INTO {TABLE}
+                (name, description, to_sof, type, delay_type, particular, responsibility)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            [
+                row.get('name', ''), row.get('description', ''), row.get('to_sof', ''),
+                row.get('type', ''), row.get('delay_type', ''), row.get('particular', ''),
+                row.get('responsibility', ''),
+            ],
+        )
         inserted += 1
     conn.commit()
     conn.close()
