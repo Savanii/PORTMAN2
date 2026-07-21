@@ -395,13 +395,23 @@ def compute_report4(df: pd.DataFrame, fallback_df: pd.DataFrame, fin_year: str,
 
     op_totals = {}
 
+    # Total import/export quantity of all matched vessels
+    total_operation_qty = (
+        sum(op_sums.values()) +
+        sum(fallback_sums.values())
+    )
+
     for c in CATEGORY_ORDER:
         bucket = c["key"]
 
-        op_totals[bucket] = (
-            op_sums.get(bucket, 0.0)
-            + fallback_sums.get(bucket, 0.0)
-        )
+        # Show the complete operation quantity in Liquid row
+        if bucket == "Liquid":
+            op_totals[bucket] = total_operation_qty
+        else:
+            op_totals[bucket] = (
+                op_sums.get(bucket, 0.0)
+                + fallback_sums.get(bucket, 0.0)
+            )
 
         print("=" * 80)
         print(total_key)
@@ -421,10 +431,17 @@ def compute_report4(df: pd.DataFrame, fallback_df: pd.DataFrame, fin_year: str,
 
     for c in CATEGORY_ORDER:
         bucket = c["key"]
-        pipeline[bucket] = max(
-            0.0,
-            month_totals[bucket] - op_totals[bucket]
-        )
+
+        if bucket == "Liquid":
+            pipeline[bucket] = max(
+                0.0,
+                month_totals.get("Liquid", 0.0) - total_operation_qty
+            )
+        else:
+            pipeline[bucket] = max(
+                0.0,
+                month_totals.get(bucket, 0.0) - op_totals[bucket]
+            )
 
     total_col = {}
 
