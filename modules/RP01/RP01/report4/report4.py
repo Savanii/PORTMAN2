@@ -161,6 +161,7 @@ CATEGORY_MAP = {
     "Edible Oil": "Liquid",
     "Chemical": "Liquid",
     "Ph.Acid": "Liquid",
+    "PHENOL": "Liquid",
 
     # Add these two
     "ACETONE": "Liquid",
