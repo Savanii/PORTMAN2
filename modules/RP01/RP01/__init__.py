@@ -26,3 +26,4 @@ from .report4 import report4
 from .custom_report import views as custom_report_views
 from .report_08 import report8 as report_08_views
 from .report9 import report09 as report_09_views
+from .report13 import report13 as report_13_views
