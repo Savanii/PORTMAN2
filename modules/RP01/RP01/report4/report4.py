@@ -71,7 +71,7 @@ DATA FLOW (current, corrected version):
     the map) came through fine. Rather than keep patching individual
     cargo names as they're discovered missing, cargo_name -> bucket is
     now looked up dynamically from vessel_cargo (cargo_name, cargo_type,
-    cargo_subcategory_2), via load_cargo_category_map() /
+    cargo_sub_category_2), via load_cargo_category_map() /
     _classify_bucket() below. The old static CATEGORY_MAP is kept ONLY as
     a fallback for any cargo_name not found in vessel_cargo at all, and
     is UNCHANGED for mis_vessel_master.category (pre-cutover path), which
@@ -101,11 +101,11 @@ ASSUMPTIONS MADE (please confirm / correct these):
      month work (Apr start of financial year).
   6. lueu_parcel_log-SPECIFIC: ldud_parcel_ops.cargo_name is now mapped to
      a report4 bucket DYNAMICALLY from vessel_cargo (cargo_name,
-     cargo_type, cargo_subcategory_2) — see load_cargo_category_map() and
+     cargo_type, cargo_sub_category_2) — see load_cargo_category_map() and
      _classify_bucket(). The old static CATEGORY_MAP is used only as a
      fallback when a cargo_name isn't found in vessel_cargo at all. I
      don't actually know the real distinct values of cargo_type /
-     cargo_subcategory_2 yet — _classify_bucket() uses best-guess
+     cargo_sub_category_2 yet — _classify_bucket() uses best-guess
      keywords and LOGS every cargo_name it can't classify. Check those
      logs and tell me the real values so the keyword rules can be
      corrected/tightened.
@@ -131,7 +131,7 @@ ASSUMPTIONS MADE (please confirm / correct these):
   14. vessel_cargo.cargo_name is assumed to match ldud_parcel_ops.cargo_name
       text (matched case-insensitively + trimmed). If vessel_cargo has
       multiple rows for the same cargo_name with different cargo_type /
-      cargo_subcategory_2, the LAST row returned by the query wins (no
+      cargo_sub_category_2, the LAST row returned by the query wins (no
       documented "correct" row to prefer yet) — flag if there's a
       deterministic rule this should follow instead (e.g. most recent).
   15. The vessel_cargo-derived category map is cached in-process for
@@ -300,7 +300,7 @@ def _normalize_name(val) -> str:
 # silently drops any name we didn't think to add — e.g. PHENOL was missing
 # even though ACETONE was present, causing real quantity to disappear from
 # the July totals with no error), we now look up cargo_name in vessel_cargo
-# and classify its bucket from cargo_type / cargo_subcategory_2.
+# and classify its bucket from cargo_type / cargo_sub_category_2.
 #
 # See Assumption 6/14/15 in the module docstring for the caveats on this.
 # =============================================================================
@@ -310,9 +310,9 @@ CARGO_MAP_CACHE_SECONDS = 300  # re-fetch vessel_cargo at most every 5 minutes
 _cargo_map_cache = {"map": None, "loaded_at": 0.0, "unclassified": []}
 
 
-def _classify_bucket(cargo_type, cargo_subcategory_2):
+def _classify_bucket(cargo_type, cargo_sub_category_2):
     """Best-guess classifier from vessel_cargo.cargo_type /
-    cargo_subcategory_2 into a report4 bucket. Returns None if neither
+    cargo_sub_category_2 into a report4 bucket. Returns None if neither
     field matches any known keyword (caller logs these as unclassified,
     they are NOT silently guessed into a bucket).
 
@@ -320,11 +320,11 @@ def _classify_bucket(cargo_type, cargo_subcategory_2):
     the old static CATEGORY_MAP (POL, Chemical, Edible Oil, Ph.Acid,
     Phenol, Acetone, Furnace Oil, Cement, Break Bulk, Containers, General
     Cargo). I don't know the real distinct values of cargo_type /
-    cargo_subcategory_2 yet — please confirm/correct these against
-    `SELECT DISTINCT cargo_type, cargo_subcategory_2 FROM vessel_cargo`."""
+    cargo_sub_category_2 yet — please confirm/correct these against
+    `SELECT DISTINCT cargo_type, cargo_sub_category_2 FROM vessel_cargo`."""
 
     t = (str(cargo_type) if cargo_type is not None else "").strip().lower()
-    s = (str(cargo_subcategory_2) if cargo_subcategory_2 is not None else "").strip().lower()
+    s = (str(cargo_sub_category_2) if cargo_sub_category_2 is not None else "").strip().lower()
     combined = f"{t} {s}".strip()
 
     if not combined or combined == "none none":
@@ -352,10 +352,10 @@ def _classify_bucket(cargo_type, cargo_subcategory_2):
 
 def load_cargo_category_map(force_refresh: bool = False) -> dict:
     """Builds { normalized_cargo_name: bucket } from vessel_cargo, using
-    cargo_type / cargo_subcategory_2 to classify each cargo_name into a
+    cargo_type / cargo_sub_category_2 to classify each cargo_name into a
     report4 bucket. Cached in-process for CARGO_MAP_CACHE_SECONDS.
 
-    Any cargo_name whose cargo_type/cargo_subcategory_2 doesn't match a
+    Any cargo_name whose cargo_type/cargo_sub_category_2 doesn't match a
     known keyword is logged (not silently added to the map — it's just
     absent, so callers fall back to the static CATEGORY_MAP or, failing
     that, drop the row and log it in load_lueu_data)."""
@@ -372,7 +372,7 @@ def load_cargo_category_map(force_refresh: bool = False) -> dict:
     try:
         cur = get_cursor(conn)
         cur.execute("""
-            SELECT DISTINCT cargo_name, cargo_type, cargo_subcategory_2
+            SELECT DISTINCT cargo_name, cargo_type, cargo_sub_category_2
             FROM vessel_cargo
             WHERE cargo_name IS NOT NULL
         """)
@@ -386,7 +386,7 @@ def load_cargo_category_map(force_refresh: bool = False) -> dict:
     for r in rows:
         cargo_name = str(r["cargo_name"]).strip()
         cargo_type = r.get("cargo_type")
-        cargo_sub2 = r.get("cargo_subcategory_2")
+        cargo_sub2 = r.get("cargo_sub_category_2")
 
         bucket = _classify_bucket(cargo_type, cargo_sub2)
         norm_name = cargo_name.strip().casefold()
@@ -395,7 +395,7 @@ def load_cargo_category_map(force_refresh: bool = False) -> dict:
             unclassified.append({
                 "cargo_name": cargo_name,
                 "cargo_type": cargo_type,
-                "cargo_subcategory_2": cargo_sub2,
+                "cargo_sub_category_2": cargo_sub2,
             })
             continue
 
@@ -406,11 +406,11 @@ def load_cargo_category_map(force_refresh: bool = False) -> dict:
     print(f"[load_cargo_category_map] Classified into a bucket: {len(mapping)}")
     if unclassified:
         print(f"[load_cargo_category_map] !!! {len(unclassified)} cargo_name rows could NOT be "
-              f"classified (cargo_type/cargo_subcategory_2 didn't match any keyword rule):")
+              f"classified (cargo_type/cargo_sub_category_2 didn't match any keyword rule):")
         for u in unclassified:
             print(f"    cargo_name={u['cargo_name']!r}  cargo_type={u['cargo_type']!r}  "
-                  f"cargo_subcategory_2={u['cargo_subcategory_2']!r}")
-        print("[load_cargo_category_map] -> Send me these cargo_type/cargo_subcategory_2 values "
+                  f"cargo_sub_category_2={u['cargo_sub_category_2']!r}")
+        print("[load_cargo_category_map] -> Send me these cargo_type/cargo_sub_category_2 values "
               "and I'll add matching keyword rules to _classify_bucket().")
     print("=" * 80)
 
@@ -521,7 +521,7 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
 
     UPDATED (2026-07-22): cargo_name -> bucket is no longer a fixed static
     guess. It's now looked up dynamically from vessel_cargo
-    (cargo_name/cargo_type/cargo_subcategory_2) via
+    (cargo_name/cargo_type/cargo_sub_category_2) via
     load_cargo_category_map(). The static CATEGORY_MAP is kept ONLY as a
     fallback for any cargo_name not found in vessel_cargo at all. This was
     prompted by a BOCHEM HOUSTON / VCN-2627-003 screenshot showing PHENOL
@@ -658,7 +658,7 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
         )
         print(unmapped_summary.to_string())
         print("[load_lueu_data] -> Check the [load_cargo_category_map] log above for these "
-              "cargo_names' cargo_type/cargo_subcategory_2 values, or add them to CATEGORY_MAP directly.")
+              "cargo_names' cargo_type/cargo_sub_category_2 values, or add them to CATEGORY_MAP directly.")
     else:
         print("[load_lueu_data] All cargo_name values mapped to a bucket successfully.")
 
