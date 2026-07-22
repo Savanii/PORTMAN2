@@ -63,6 +63,19 @@ DATA FLOW (current, corrected version):
     database, placed next to the app's displayed value for that same
     bucket/month, rather than another visual/verbal description — to
     avoid continuing to flip this back and forth without settling it.
+  - DYNAMIC CATEGORY MAPPING (added 2026-07-22): cargo_name -> bucket for
+    the lueu_parcel_log path is no longer a hand-maintained static guess
+    list. A BOCHEM HOUSTON / VCN-2627-003 screenshot showed PHENOL cargo
+    (2748.223 MT) silently disappearing from totals because "PHENOL" was
+    missing from the old static CATEGORY_MAP, while ACETONE (present in
+    the map) came through fine. Rather than keep patching individual
+    cargo names as they're discovered missing, cargo_name -> bucket is
+    now looked up dynamically from vessel_cargo (cargo_name, cargo_type,
+    cargo_subcategory_2), via load_cargo_category_map() /
+    _classify_bucket() below. The old static CATEGORY_MAP is kept ONLY as
+    a fallback for any cargo_name not found in vessel_cargo at all, and
+    is UNCHANGED for mis_vessel_master.category (pre-cutover path), which
+    was separately confirmed and is not affected by this change.
 
 ASSUMPTIONS MADE (please confirm / correct these):
   1. Rail / Road / Inland-Water-Transport-or-Coastal-Movement figures have
@@ -86,12 +99,16 @@ ASSUMPTIONS MADE (please confirm / correct these):
      its `cast_off_datetime` (text) is parsed into a real date and converted
      to fin_year/fy_month_idx the same way mis_vessel_master's fin_year/
      month work (Apr start of financial year).
-  6. lueu_parcel_log-SPECIFIC: ldud_parcel_ops.cargo_name is mapped to the
-     same Liquid/Cement/Break-Bulk buckets using the SAME CATEGORY_MAP
-     guesses used for mis_vessel_master.category. I don't actually know
-     cargo_name's real distinct values — if this mapping is wrong, tell me
-     the real values and I'll correct CATEGORY_MAP (or add a separate map
-     for cargo_name specifically).
+  6. lueu_parcel_log-SPECIFIC: ldud_parcel_ops.cargo_name is now mapped to
+     a report4 bucket DYNAMICALLY from vessel_cargo (cargo_name,
+     cargo_type, cargo_subcategory_2) — see load_cargo_category_map() and
+     _classify_bucket(). The old static CATEGORY_MAP is used only as a
+     fallback when a cargo_name isn't found in vessel_cargo at all. I
+     don't actually know the real distinct values of cargo_type /
+     cargo_subcategory_2 yet — _classify_bucket() uses best-guess
+     keywords and LOGS every cargo_name it can't classify. Check those
+     logs and tell me the real values so the keyword rules can be
+     corrected/tightened.
   7. lueu_parcel_log-SPECIFIC: rows where is_deleted is true are excluded
      from the sum. Rows with is_shortclose = true are currently still
      INCLUDED — flag if those should be excluded too.
@@ -111,9 +128,19 @@ ASSUMPTIONS MADE (please confirm / correct these):
   13. Tonnage figures (Rail/Road/Inland/Pipe Line/Total columns) are shown
       to 6 decimal places, both in the JSON API and the Excel export.
       Percentages remain at 2 decimal places.
+  14. vessel_cargo.cargo_name is assumed to match ldud_parcel_ops.cargo_name
+      text (matched case-insensitively + trimmed). If vessel_cargo has
+      multiple rows for the same cargo_name with different cargo_type /
+      cargo_subcategory_2, the LAST row returned by the query wins (no
+      documented "correct" row to prefer yet) — flag if there's a
+      deterministic rule this should follow instead (e.g. most recent).
+  15. The vessel_cargo-derived category map is cached in-process for
+      CARGO_MAP_CACHE_SECONDS (default 300s) to avoid re-querying on every
+      report load. Set to 0 to disable caching while validating.
 """
 
 import io
+import time
 import traceback
 from functools import wraps
 
@@ -148,11 +175,17 @@ CATEGORY_ORDER = [
     {"sr": 4, "key": "Break Bulk / Containers"},
 ]
 
-# mis_vessel_master.category (and, as a fallback guess, ldud_parcel_ops.cargo_name)
-# -> report4 bucket. Only the "Liquid" entries have confirmed data today (per
-# `SELECT DISTINCT category FROM mis_vessel_master`). Cement / Break Bulk /
-# Containers mappings are included pre-emptively — update the left-hand
-# values if your actual category/cargo_name text differs from these guesses.
+# mis_vessel_master.category -> report4 bucket. Only the "Liquid" entries
+# have confirmed data today (per `SELECT DISTINCT category FROM
+# mis_vessel_master`). Cement / Break Bulk / Containers mappings are
+# included pre-emptively — update the left-hand values if your actual
+# category text differs from these guesses.
+#
+# NOTE: this static map is STILL used as-is for mis_vessel_master.category
+# (pre-cutover path — see Assumption 3, unaffected by the dynamic
+# vessel_cargo mapping below). For the lueu_parcel_log path (cargo_name),
+# it is now used ONLY as a fallback for cargo_name values not found in
+# vessel_cargo at all — see load_cargo_category_map() / _classify_bucket().
 CATEGORY_MAP = {
     # Liquid
     "POL": "Liquid",
@@ -162,8 +195,6 @@ CATEGORY_MAP = {
     "Chemical": "Liquid",
     "Ph.Acid": "Liquid",
     "PHENOL": "Liquid",
-
-    # Add these two
     "ACETONE": "Liquid",
     "FURNACE OIL": "Liquid",
 
@@ -261,6 +292,135 @@ def _normalize_name(val) -> str:
     return str(val).strip().casefold()
 
 
+# =============================================================================
+# DYNAMIC CATEGORY MAPPING — sourced from vessel_cargo
+# =============================================================================
+# Replaces the old static CATEGORY_MAP guesswork for lueu_parcel_log's
+# cargo_name -> bucket mapping. Instead of hardcoding cargo names (which
+# silently drops any name we didn't think to add — e.g. PHENOL was missing
+# even though ACETONE was present, causing real quantity to disappear from
+# the July totals with no error), we now look up cargo_name in vessel_cargo
+# and classify its bucket from cargo_type / cargo_subcategory_2.
+#
+# See Assumption 6/14/15 in the module docstring for the caveats on this.
+# =============================================================================
+
+CARGO_MAP_CACHE_SECONDS = 300  # re-fetch vessel_cargo at most every 5 minutes
+
+_cargo_map_cache = {"map": None, "loaded_at": 0.0, "unclassified": []}
+
+
+def _classify_bucket(cargo_type, cargo_subcategory_2):
+    """Best-guess classifier from vessel_cargo.cargo_type /
+    cargo_subcategory_2 into a report4 bucket. Returns None if neither
+    field matches any known keyword (caller logs these as unclassified,
+    they are NOT silently guessed into a bucket).
+
+    KEYWORD RULES — best guesses based on the same category words used in
+    the old static CATEGORY_MAP (POL, Chemical, Edible Oil, Ph.Acid,
+    Phenol, Acetone, Furnace Oil, Cement, Break Bulk, Containers, General
+    Cargo). I don't know the real distinct values of cargo_type /
+    cargo_subcategory_2 yet — please confirm/correct these against
+    `SELECT DISTINCT cargo_type, cargo_subcategory_2 FROM vessel_cargo`."""
+
+    t = (str(cargo_type) if cargo_type is not None else "").strip().lower()
+    s = (str(cargo_subcategory_2) if cargo_subcategory_2 is not None else "").strip().lower()
+    combined = f"{t} {s}".strip()
+
+    if not combined or combined == "none none":
+        return None
+
+    # DRY BULK (CEMENT)
+    if "cement" in combined:
+        return "DRY BULK (CEMENT)"
+
+    # Liquid — covers POL / chemical / edible oil / acid style cargo
+    liquid_keywords = [
+        "liquid", "pol", "chemical", "oil", "acid", "phenol",
+        "acetone", "furnace", "solvent", "edible",
+    ]
+    if any(kw in combined for kw in liquid_keywords):
+        return "Liquid"
+
+    # Break Bulk / Containers
+    breakbulk_keywords = ["break bulk", "breakbulk", "container", "general cargo"]
+    if any(kw in combined for kw in breakbulk_keywords):
+        return "Break Bulk / Containers"
+
+    return None
+
+
+def load_cargo_category_map(force_refresh: bool = False) -> dict:
+    """Builds { normalized_cargo_name: bucket } from vessel_cargo, using
+    cargo_type / cargo_subcategory_2 to classify each cargo_name into a
+    report4 bucket. Cached in-process for CARGO_MAP_CACHE_SECONDS.
+
+    Any cargo_name whose cargo_type/cargo_subcategory_2 doesn't match a
+    known keyword is logged (not silently added to the map — it's just
+    absent, so callers fall back to the static CATEGORY_MAP or, failing
+    that, drop the row and log it in load_lueu_data)."""
+
+    now = time.time()
+    if (
+        not force_refresh
+        and _cargo_map_cache["map"] is not None
+        and (now - _cargo_map_cache["loaded_at"]) < CARGO_MAP_CACHE_SECONDS
+    ):
+        return _cargo_map_cache["map"]
+
+    conn = get_db()
+    try:
+        cur = get_cursor(conn)
+        cur.execute("""
+            SELECT DISTINCT cargo_name, cargo_type, cargo_subcategory_2
+            FROM vessel_cargo
+            WHERE cargo_name IS NOT NULL
+        """)
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    mapping = {}
+    unclassified = []
+
+    for r in rows:
+        cargo_name = str(r["cargo_name"]).strip()
+        cargo_type = r.get("cargo_type")
+        cargo_sub2 = r.get("cargo_subcategory_2")
+
+        bucket = _classify_bucket(cargo_type, cargo_sub2)
+        norm_name = cargo_name.strip().casefold()
+
+        if bucket is None:
+            unclassified.append({
+                "cargo_name": cargo_name,
+                "cargo_type": cargo_type,
+                "cargo_subcategory_2": cargo_sub2,
+            })
+            continue
+
+        mapping[norm_name] = bucket
+
+    print("=" * 80)
+    print(f"[load_cargo_category_map] Loaded {len(rows)} distinct cargo_name rows from vessel_cargo.")
+    print(f"[load_cargo_category_map] Classified into a bucket: {len(mapping)}")
+    if unclassified:
+        print(f"[load_cargo_category_map] !!! {len(unclassified)} cargo_name rows could NOT be "
+              f"classified (cargo_type/cargo_subcategory_2 didn't match any keyword rule):")
+        for u in unclassified:
+            print(f"    cargo_name={u['cargo_name']!r}  cargo_type={u['cargo_type']!r}  "
+                  f"cargo_subcategory_2={u['cargo_subcategory_2']!r}")
+        print("[load_cargo_category_map] -> Send me these cargo_type/cargo_subcategory_2 values "
+              "and I'll add matching keyword rules to _classify_bucket().")
+    print("=" * 80)
+
+    _cargo_map_cache["map"] = mapping
+    _cargo_map_cache["loaded_at"] = now
+    _cargo_map_cache["unclassified"] = unclassified
+
+    return mapping
+
+
 def load_data() -> pd.DataFrame:
     """Loads mis_vessel_master rows (fin_year/month/category/quantity/
     vessel_name/import_export)."""
@@ -343,8 +503,8 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
     (parsed into a real date, then converted to fin_year/fy_month_idx using
     the same Apr-start financial-year convention as mis_vessel_master).
 
-    UPDATED: ldud_header has its own `operation_type` column ('Import' /
-    'Export'), confirmed directly against your own working queries:
+    ldud_header has its own `operation_type` column ('Import' / 'Export'),
+    confirmed directly against your own working queries:
         SELECT COALESCE(SUM(lul.quantity), 0)
         FROM ldud_header lh
         JOIN ldud_parcel_ops lpo ON lpo.ldud_id = lh.id
@@ -356,22 +516,24 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
     This means lueu_parcel_log/ldud_header does NOT need vessel-name
     matching against vcn_header at all — exactly like mis_vessel_master's
     own `import_export` column, `lh.operation_type` (normalized the same
-    way: trimmed + lowercased) is now used directly to split Import vs
-    Export for this source. The old vcn_header vessel-name-matching
-    approach for this path (and the "swap" workaround that compensated for
-    its incorrect crossing) has been removed / reverted.
+    way: trimmed + lowercased) is used directly to split Import vs Export
+    for this source.
 
-    DEBUG (added 2026-07-22): this function now logs, for the requested
-    fin_year/month_idx, every row that gets silently EXCLUDED from the
-    final totals and WHY — specifically:
-      (a) rows whose cast_off_datetime failed to parse (-> dropped by the
-          fin_year/month_idx filter with no trace),
-      (b) rows whose cargo_name did not match any key in CATEGORY_MAP
-          (-> dropped by dropna(subset=["bucket"])),
-      (c) a raw vs. post-filter row/quantity count so you can see how much
-          total quantity is being lost at each step.
-    This is temporary — intended to pin down why Jul-2026 totals look
-    short. Remove once resolved."""
+    UPDATED (2026-07-22): cargo_name -> bucket is no longer a fixed static
+    guess. It's now looked up dynamically from vessel_cargo
+    (cargo_name/cargo_type/cargo_subcategory_2) via
+    load_cargo_category_map(). The static CATEGORY_MAP is kept ONLY as a
+    fallback for any cargo_name not found in vessel_cargo at all. This was
+    prompted by a BOCHEM HOUSTON / VCN-2627-003 screenshot showing PHENOL
+    cargo silently dropped from totals because it wasn't in the old
+    hardcoded map.
+
+    DEBUG LOGGING (kept from earlier fix, still active): this function
+    logs, for the requested fin_year/month_idx, every row that gets
+    excluded from the final totals and WHY — unparseable
+    cast_off_datetime, unexpected operation_type values, and any
+    cargo_name that's unmapped even after the vessel_cargo + fallback
+    lookups — so nothing disappears from totals silently again."""
 
     conn = get_db()
 
@@ -445,12 +607,13 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
 
     if df.empty:
         print("[load_lueu_data] No rows for this period after date filtering. "
-              "If you expected July data, check the unparseable-date warning above "
-              "and confirm cast_off_datetime values actually fall in July 2026.")
+              "If you expected data here, check the unparseable-date warning above "
+              "and confirm cast_off_datetime values actually fall in this period.")
         print("=" * 80)
         return pd.DataFrame(columns=["bucket", "quantity_000t", "import_export"])
 
     df["cargo_name"] = df["cargo_name"].astype(str).str.strip()
+    df["cargo_name_norm"] = df["cargo_name"].str.strip().str.casefold()
 
     # Same normalization as mis_vessel_master.import_export: trim + lowercase
     df["operation_type"] = df["operation_type"].astype(str).str.strip()
@@ -464,22 +627,38 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
         print(f"[load_lueu_data] !!! UNEXPECTED operation_type values found (not 'import'/'export'): "
               f"{unexpected_ops} — these rows will not be counted in EITHER table.")
 
-    # ---- (c) cargo_name -> bucket mapping diagnostics ----
-    df["bucket"] = df["cargo_name"].map(CATEGORY_MAP)
+    # ---- (c) DYNAMIC cargo_name -> bucket lookup from vessel_cargo ----
+    dynamic_map = load_cargo_category_map()
+    df["bucket"] = df["cargo_name_norm"].map(dynamic_map)
 
+    dynamic_hits = df["bucket"].notna().sum()
+    print(f"[load_lueu_data] cargo_name rows classified via vessel_cargo dynamic map: {dynamic_hits} / {len(df)}")
+
+    # ---- Fallback to static CATEGORY_MAP for anything not found in vessel_cargo ----
+    still_missing = df["bucket"].isna()
+    if still_missing.any():
+        static_norm_map = {k.strip().casefold(): v for k, v in CATEGORY_MAP.items()}
+        fallback_hits = df.loc[still_missing, "cargo_name_norm"].map(static_norm_map)
+        df.loc[still_missing, "bucket"] = fallback_hits
+        n_fallback_used = fallback_hits.notna().sum()
+        if n_fallback_used:
+            print(f"[load_lueu_data] cargo_name rows classified via static CATEGORY_MAP fallback: {n_fallback_used}")
+
+    # ---- Log anything STILL unmapped after both lookups ----
     unmapped = df[df["bucket"].isna()]
     if not unmapped.empty:
         lost_qty = unmapped["quantity"].sum()
-        print(f"[load_lueu_data] !!! {len(unmapped)} rows have a cargo_name NOT in CATEGORY_MAP "
-              f"and will be DROPPED (lost quantity = {lost_qty:,.3f}):")
-        # Group by the actual unmapped cargo_name values so you can see exactly
-        # which strings need to be added to CATEGORY_MAP.
+        print(f"[load_lueu_data] !!! {len(unmapped)} rows have a cargo_name NOT found in "
+              f"vessel_cargo (classifiable) OR the static CATEGORY_MAP fallback — DROPPED "
+              f"(lost quantity = {lost_qty:,.3f}):")
         unmapped_summary = (
             unmapped.groupby("cargo_name")["quantity"]
             .agg(["count", "sum"])
             .sort_values("sum", ascending=False)
         )
         print(unmapped_summary.to_string())
+        print("[load_lueu_data] -> Check the [load_cargo_category_map] log above for these "
+              "cargo_names' cargo_type/cargo_subcategory_2 values, or add them to CATEGORY_MAP directly.")
     else:
         print("[load_lueu_data] All cargo_name values mapped to a bucket successfully.")
 
@@ -979,7 +1158,7 @@ def report4_api_export():
         else:
             lueu_df = pd.DataFrame(columns=["bucket", "quantity_000t", "import_export"])
 
-        print("[report4] report4_api_export CODE VERSION = 2026-07-21-swapped-back-direct-mapping")
+        print("[report4] report4_api_export CODE VERSION = 2026-07-22-dynamic-vessel_cargo-mapping")
 
         # ---- Table 1: Despatched (Import) table ----
         # SWAPPED BACK per explicit user confirmation (see
@@ -1073,7 +1252,7 @@ def report4_api_export():
         # Visible version stamp (small, out of the way) so you can confirm
         # at a glance which code version produced this specific download —
         # remove this once the summary/swap issue is confirmed resolved.
-        ws_import["A1"] = "v2026-07-21-swapped-back-direct-mapping"
+        ws_import["A1"] = "v2026-07-22-dynamic-vessel_cargo-mapping"
         ws_import["A1"].font = Font(size=8, italic=True, color="999999")
 
         buf = io.BytesIO()
