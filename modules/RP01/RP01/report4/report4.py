@@ -140,6 +140,7 @@ ASSUMPTIONS MADE (please confirm / correct these):
 """
 
 import io
+import re
 import time
 import traceback
 from functools import wraps
@@ -292,6 +293,26 @@ def _normalize_name(val) -> str:
     return str(val).strip().casefold()
 
 
+def _normalize_cargo_key(val) -> str:
+    """Normalizes a cargo_name/category string for matching across sources.
+
+    FIX (2026-07-22): a plain .strip().casefold() is NOT enough for
+    cargo_name matching — a screenshot showed "PH ACID" (real cargo_name
+    used in ldud_parcel_ops) silently failing to match the static
+    CATEGORY_MAP's "Ph.Acid" entry, because casefold() alone doesn't
+    remove the period: "ph.acid" != "ph acid". This collapses ALL
+    non-alphanumeric characters (periods, hyphens, extra whitespace) into
+    single spaces before casefolding, so "Ph.Acid", "PH ACID", "ph-acid",
+    "PH  ACID" etc. all normalize to the same key ("ph acid") and match
+    correctly. Used for BOTH the dynamic vessel_cargo map keys and the
+    static CATEGORY_MAP fallback keys, and for the incoming cargo_name
+    values being looked up — so all three sides use identical
+    normalization and can never silently diverge like this again."""
+    s = str(val).strip().casefold()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return s.strip()
+
+
 # =============================================================================
 # DYNAMIC CATEGORY MAPPING — sourced from vessel_cargo
 # =============================================================================
@@ -389,7 +410,7 @@ def load_cargo_category_map(force_refresh: bool = False) -> dict:
         cargo_sub2 = r.get("cargo_sub_category_2")
 
         bucket = _classify_bucket(cargo_type, cargo_sub2)
-        norm_name = cargo_name.strip().casefold()
+        norm_name = _normalize_cargo_key(cargo_name)
 
         if bucket is None:
             unclassified.append({
@@ -613,7 +634,7 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
         return pd.DataFrame(columns=["bucket", "quantity_000t", "import_export"])
 
     df["cargo_name"] = df["cargo_name"].astype(str).str.strip()
-    df["cargo_name_norm"] = df["cargo_name"].str.strip().str.casefold()
+    df["cargo_name_norm"] = df["cargo_name"].apply(_normalize_cargo_key)
 
     # Same normalization as mis_vessel_master.import_export: trim + lowercase
     df["operation_type"] = df["operation_type"].astype(str).str.strip()
@@ -637,7 +658,7 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
     # ---- Fallback to static CATEGORY_MAP for anything not found in vessel_cargo ----
     still_missing = df["bucket"].isna()
     if still_missing.any():
-        static_norm_map = {k.strip().casefold(): v for k, v in CATEGORY_MAP.items()}
+        static_norm_map = {_normalize_cargo_key(k): v for k, v in CATEGORY_MAP.items()}
         fallback_hits = df.loc[still_missing, "cargo_name_norm"].map(static_norm_map)
         df.loc[still_missing, "bucket"] = fallback_hits
         n_fallback_used = fallback_hits.notna().sum()
