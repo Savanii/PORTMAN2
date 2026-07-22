@@ -258,11 +258,32 @@ def berth_plan_page():
 
 
 def get_report_window(plan_date_str):
-    """'As on <date> @ 07:00' covers the PRIOR 24 hours:
-    (date-1) 07:00 -> date 07:00."""
-    plan_date = datetime.strptime(plan_date_str, '%Y-%m-%d')
-    window_end = plan_date.replace(hour=7, minute=0, second=0, microsecond=0)
-    window_start = window_end - timedelta(days=1)
+    """
+    Selected date = calendar day.
+
+    Report window:
+        00:00:00 -> 23:59:59
+
+    'As On' time:
+        Today      -> current time (live)
+        Past date  -> 23:59
+    """
+    plan_date = datetime.strptime(plan_date_str, "%Y-%m-%d").date()
+    today = datetime.now().date()
+
+    window_start = datetime.combine(
+        plan_date,
+        datetime.min.time()
+    )
+
+    if plan_date == today:
+        window_end = datetime.now()
+    else:
+        window_end = datetime.combine(
+            plan_date,
+            datetime.max.time().replace(microsecond=0)
+        )
+
     return window_start, window_end
 
 
@@ -448,9 +469,10 @@ def _base_row(h):
         'berth_name': h.get('berth_name') or '',
         'imo_num': h.get('imo_num') or '',
         'nationality': h.get('nationality') or '',
+        'vessel_run_type': h.get('vessel_run_type') or '',
         'remarks': '',
     }
-
+    
 def get_berthed_vessels(window_start, window_end, berths):
     conn = get_db()
     cur = get_cursor(conn)
@@ -470,28 +492,32 @@ def get_berthed_vessels(window_start, window_end, berths):
                  WHERE cn.vcn_id = h.id LIMIT 1) AS imp_pipeline
         FROM ldud_header l
         JOIN vcn_header h ON h.id = l.vcn_id
-        LEFT JOIN vessels v ON UPPER(TRIM(v.vessel_name)) = UPPER(TRIM(h.vessel_name))
+        LEFT JOIN vessels v
+            ON UPPER(REPLACE(TRIM(v.vessel_name), 'MT ', ''))
+            =
+            UPPER(REPLACE(TRIM(h.vessel_name), 'MT ', ''))
         WHERE h.berth_name = ANY(%s)
           AND l.alongside_datetime IS NOT NULL
           AND (NULLIF(l.alongside_datetime::text, ''))::timestamp < %s
           AND (
                 l.{SAIL_COLUMN} IS NULL
                 OR NULLIF(TRIM(l.{SAIL_COLUMN}::text), '') IS NULL
-                OR (NULLIF(l.{SAIL_COLUMN}::text, ''))::timestamp >= %s
+                OR (NULLIF(l.{SAIL_COLUMN}::text, ''))::timestamp > %s
               )
         ORDER BY h.berth_name, l.alongside_datetime DESC
     ''', [berths, window_end, window_start])
     headers = [dict(r) for r in cur.fetchall()]
 
-    # ===== Keep only the LATEST vessel per berth (a berth can physically =====
-    # ===== hold just one vessel — dedupe any stale/overlapping records) =====
-    latest_per_berth = {}
-    for h in headers:
-        b = h['berth_name']
-        if b not in latest_per_berth:
-            latest_per_berth[b] = h  # first row per berth = latest, thanks to ORDER BY above
-    headers = list(latest_per_berth.values())
-
+    # ── NOTE: previously this deduped to ONE vessel per berth (kept only
+    # the most-recent alongside_datetime), which silently dropped any
+    # still-active vessel (balance > 0, no cast-off yet) whenever another
+    # row for the same berth existed with a newer alongside_datetime.
+    # The SQL WHERE clause above already guarantees every remaining row
+    # is genuinely still-berthed (not sailed as of this window) — so we
+    # keep ALL of them and let _enrich_vessel's balance<=0 check (below)
+    # be the only reason a vessel drops out. This is also what the Excel
+    # export already expects (group_by_berth supports multiple vessels
+    # per berth).
     out = []
     for h in headers:
         row = _base_row(h)
@@ -500,14 +526,76 @@ def get_berthed_vessels(window_start, window_end, berths):
         row['terminal'] = h['exp_terminal'] if h['operation_type'] == 'Export' else h['imp_terminal']
         row['pipeline'] = h['exp_pipeline'] if h['operation_type'] == 'Export' else h['imp_pipeline']
         row.update(_enrich_vessel(cur, h['vcn_id'], h['ldud_id'], window_start, window_end))
-        # Only show vessels currently under discharge (balance > 0);
-        # completed vessels and stale duplicates are excluded
-        balance = row.get('balance')
+
+        balance = row.get("balance")
         if balance is not None and float(balance) <= 0:
-            continue
+            continue   # fully discharged/loaded — this is the ONLY reason to drop it
+
         out.append(row)
     conn.close()
-    return out
+    return out    
+
+# def get_berthed_vessels(window_start, window_end, berths):
+#     conn = get_db()
+#     cur = get_cursor(conn)
+#     cur.execute(f'''
+#         SELECT DISTINCT h.id AS vcn_id, l.id AS ldud_id, h.via_number, h.vessel_name,
+#                h.loa, h.draft, h.vessel_agent_name, h.cargo_type, h.berth_name,
+#                h.operation_type,
+#                v.imo_num, v.nationality,
+#                l.alongside_datetime,
+#                (SELECT ec.unload_terminal FROM vcn_export_cargo_declaration ec
+#                  WHERE ec.vcn_id = h.id LIMIT 1) AS exp_terminal,
+#                (SELECT ec.pipeline_name FROM vcn_export_cargo_declaration ec
+#                  WHERE ec.vcn_id = h.id LIMIT 1) AS exp_pipeline,
+#                (SELECT cn.unload_terminal FROM vcn_consigners cn
+#                  WHERE cn.vcn_id = h.id LIMIT 1) AS imp_terminal,
+#                (SELECT cn.pipeline_name FROM vcn_consigners cn
+#                  WHERE cn.vcn_id = h.id LIMIT 1) AS imp_pipeline
+#         FROM ldud_header l
+#         JOIN vcn_header h ON h.id = l.vcn_id
+#         LEFT JOIN vessels v
+#             ON UPPER(REPLACE(TRIM(v.vessel_name), 'MT ', ''))
+#             =
+#             UPPER(REPLACE(TRIM(h.vessel_name), 'MT ', ''))
+#         WHERE h.berth_name = ANY(%s)
+#           AND l.alongside_datetime IS NOT NULL
+#           AND (NULLIF(l.alongside_datetime::text, ''))::timestamp < %s
+#           AND (
+#                 l.{SAIL_COLUMN} IS NULL
+#                 OR NULLIF(TRIM(l.{SAIL_COLUMN}::text), '') IS NULL
+#                 OR (NULLIF(l.{SAIL_COLUMN}::text, ''))::timestamp > %s
+#               )
+#         ORDER BY h.berth_name, l.alongside_datetime DESC
+#     ''', [berths, window_end, window_start])
+#     headers = [dict(r) for r in cur.fetchall()]
+
+#     # ===== Keep only the LATEST vessel per berth (a berth can physically =====
+#     # ===== hold just one vessel — dedupe any stale/overlapping records) =====
+#     latest_per_berth = {}
+#     for h in headers:
+#         b = h['berth_name']
+#         if b not in latest_per_berth:
+#             latest_per_berth[b] = h  # first row per berth = latest, thanks to ORDER BY above
+#     headers = list(latest_per_berth.values())
+
+#     out = []
+#     for h in headers:
+#         row = _base_row(h)
+#         row['alongside'] = _fmt_dt(h['alongside_datetime'])
+#         row['vessel_agent'] = h['vessel_agent_name']
+#         row['terminal'] = h['exp_terminal'] if h['operation_type'] == 'Export' else h['imp_terminal']
+#         row['pipeline'] = h['exp_pipeline'] if h['operation_type'] == 'Export' else h['imp_pipeline']
+#         row.update(_enrich_vessel(cur, h['vcn_id'], h['ldud_id'], window_start, window_end))
+#         # Check whether discharge was completed as of the selected report date
+#         balance = row.get("balance")
+
+#         if balance is not None and float(balance) <= 0:
+#             continue
+
+#         out.append(row)
+#     conn.close()
+#     return out
 
 # def get_berthed_vessels(window_start, window_end, berths):
 #     conn = get_db()
@@ -582,7 +670,10 @@ def get_sailed_vessels(window_start, window_end, berths):
                  WHERE po.ldud_id = l.id) AS cargo_completion_dt
         FROM ldud_header l
         JOIN vcn_header h ON h.id = l.vcn_id
-        LEFT JOIN vessels v ON UPPER(TRIM(v.vessel_name)) = UPPER(TRIM(h.vessel_name))
+        LEFT JOIN vessels v
+            ON UPPER(REPLACE(TRIM(v.vessel_name), 'MT ', ''))
+            =
+            UPPER(REPLACE(TRIM(h.vessel_name), 'MT ', ''))
         ORDER BY h.berth_name
     ''')
     headers = [dict(r) for r in cur.fetchall()]
@@ -676,8 +767,14 @@ def _xl_field_value(row, field):
         return f"{loa or ''} / {dft or ''}" if (loa or dft) else ''
     if field == '__via_f_ovs_imo':
         via = row.get('via_no') or ''
-        flag = (row.get('nationality') or '').strip().lower()
-        ovs = 'Domestic' if flag == 'india' else 'Overseas'
+        run_type = (row.get('vessel_run_type') or '').strip().lower()
+
+        if run_type == 'foreign':
+            ovs = 'Overseas'
+        elif run_type == 'coastal':
+            ovs = 'Coastal'
+        else:
+            ovs = ''
         imo = row.get('imo_num') or ''
         return f"{via} / F / {ovs} / {imo}"
     if field == '__agt_tf_pl':
