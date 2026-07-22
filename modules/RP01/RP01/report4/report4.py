@@ -358,7 +358,19 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
     way: trimmed + lowercased) is now used directly to split Import vs
     Export for this source. The old vcn_header vessel-name-matching
     approach for this path (and the "swap" workaround that compensated for
-    its incorrect crossing) has been removed / reverted."""
+    its incorrect crossing) has been removed / reverted.
+
+    DEBUG (added 2026-07-22): this function now logs, for the requested
+    fin_year/month_idx, every row that gets silently EXCLUDED from the
+    final totals and WHY — specifically:
+      (a) rows whose cast_off_datetime failed to parse (-> dropped by the
+          fin_year/month_idx filter with no trace),
+      (b) rows whose cargo_name did not match any key in CATEGORY_MAP
+          (-> dropped by dropna(subset=["bucket"])),
+      (c) a raw vs. post-filter row/quantity count so you can see how much
+          total quantity is being lost at each step.
+    This is temporary — intended to pin down why Jul-2026 totals look
+    short. Remove once resolved."""
 
     conn = get_db()
 
@@ -386,27 +398,56 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
     finally:
         conn.close()
 
+    print("=" * 80)
+    print(f"[load_lueu_data] DEBUG for fin_year={fin_year} month_idx={month_idx}")
+    print(f"[load_lueu_data] Raw rows fetched from DB (all periods, is_deleted excluded): {len(rows)}")
+
     if not rows:
+        print("[load_lueu_data] No rows at all from ldud_header/ldud_parcel_ops/lueu_parcel_log join.")
+        print("=" * 80)
         return pd.DataFrame(columns=["bucket", "quantity_000t", "import_export"])
 
     df = pd.DataFrame(rows)
 
+    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
+
+    print(f"[load_lueu_data] Total quantity across ALL periods (raw, pre-filter): {df['quantity'].sum():,.3f}")
+
+    # ---- (a) date parsing diagnostics ----
     df["cast_off_dt"] = pd.to_datetime(df["cast_off_datetime"], errors="coerce")
+
+    bad_dates = df[df["cast_off_dt"].isna()]
+    if not bad_dates.empty:
+        print(f"[load_lueu_data] !!! {len(bad_dates)} rows have UNPARSEABLE cast_off_datetime "
+              f"(these are silently excluded from every period): "
+              f"lost quantity = {bad_dates['quantity'].sum():,.3f}")
+        print("[load_lueu_data] Sample unparseable cast_off_datetime values:",
+              bad_dates["cast_off_datetime"].unique()[:10])
+    else:
+        print("[load_lueu_data] All cast_off_datetime values parsed OK.")
 
     fy_pairs = df["cast_off_dt"].apply(calendar_date_to_fy)
     df["row_fin_year"] = fy_pairs.apply(lambda p: p[0])
     df["row_month_idx"] = fy_pairs.apply(lambda p: p[1])
 
-    # Restrict to the selected reporting period only
+    # ---- period filter, with before/after quantity comparison ----
+    pre_filter_total = df["quantity"].sum()
+
     df = df[
         (df["row_fin_year"] == fin_year) &
         (df["row_month_idx"] == month_idx)
     ]
 
-    if df.empty:
-        return pd.DataFrame(columns=["bucket", "quantity_000t", "import_export"])
+    print(f"[load_lueu_data] Rows AFTER filtering to fin_year={fin_year}, month_idx={month_idx}: {len(df)}")
+    print(f"[load_lueu_data] Quantity AFTER period filter: {df['quantity'].sum():,.3f}  "
+          f"(out of {pre_filter_total:,.3f} total across all periods/sources)")
 
-    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
+    if df.empty:
+        print("[load_lueu_data] No rows for this period after date filtering. "
+              "If you expected July data, check the unparseable-date warning above "
+              "and confirm cast_off_datetime values actually fall in July 2026.")
+        print("=" * 80)
+        return pd.DataFrame(columns=["bucket", "quantity_000t", "import_export"])
 
     df["cargo_name"] = df["cargo_name"].astype(str).str.strip()
 
@@ -414,14 +455,42 @@ def load_lueu_data(fin_year: str, month_idx: int) -> pd.DataFrame:
     df["operation_type"] = df["operation_type"].astype(str).str.strip()
     df["import_export"] = df["operation_type"].str.strip().str.lower()
 
+    # ---- (b) distinct operation_type sanity check ----
+    op_counts = df["import_export"].value_counts(dropna=False).to_dict()
+    print(f"[load_lueu_data] operation_type breakdown for this period (normalized): {op_counts}")
+    unexpected_ops = {k: v for k, v in op_counts.items() if k not in ("import", "export")}
+    if unexpected_ops:
+        print(f"[load_lueu_data] !!! UNEXPECTED operation_type values found (not 'import'/'export'): "
+              f"{unexpected_ops} — these rows will not be counted in EITHER table.")
+
+    # ---- (c) cargo_name -> bucket mapping diagnostics ----
     df["bucket"] = df["cargo_name"].map(CATEGORY_MAP)
+
+    unmapped = df[df["bucket"].isna()]
+    if not unmapped.empty:
+        lost_qty = unmapped["quantity"].sum()
+        print(f"[load_lueu_data] !!! {len(unmapped)} rows have a cargo_name NOT in CATEGORY_MAP "
+              f"and will be DROPPED (lost quantity = {lost_qty:,.3f}):")
+        # Group by the actual unmapped cargo_name values so you can see exactly
+        # which strings need to be added to CATEGORY_MAP.
+        unmapped_summary = (
+            unmapped.groupby("cargo_name")["quantity"]
+            .agg(["count", "sum"])
+            .sort_values("sum", ascending=False)
+        )
+        print(unmapped_summary.to_string())
+    else:
+        print("[load_lueu_data] All cargo_name values mapped to a bucket successfully.")
 
     df = df.dropna(subset=["bucket"])
 
     df["quantity_000t"] = df["quantity"] / 1000.0
 
+    print(f"[load_lueu_data] FINAL quantity retained after all filters/mapping: "
+          f"{df['quantity_000t'].sum() * 1000.0:,.3f}")
+
     print("=" * 80)
-    print("LUEU_PARCEL_LOG DATA")
+    print("LUEU_PARCEL_LOG DATA (final)")
     print(df[["bucket", "import_export", "quantity_000t"]])
     print("=" * 80)
 
