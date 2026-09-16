@@ -2,17 +2,27 @@ from flask import Blueprint, render_template, request, jsonify, session, redirec
 from . import model
 from database import get_user_permissions, get_db, get_cursor, get_module_config
 
-bp = Blueprint('SRV01', __name__, template_folder='.')
 MODULE_CODE = 'SRV01'
 MODULE_INFO = {'code': 'SRV01', 'name': 'Service Recording'}
 
+# SRV01 and SRV02 are the same screen over the same table; only the record
+# number format differs (7001, 7002, ... vs SRV1, SRV2, ...). One set of view
+# functions serves both, and the blueprint name says which module a request is
+# for — see build_blueprint at the bottom of this file.
+MODULE_NAMES = {'SRV01': 'Service Recording', 'SRV02': 'Service Recording (SRV Series)'}
 
-@bp.route('/module/SRV01/')
+
+def _code():
+    """The service module this request was routed to: 'SRV01' or 'SRV02'."""
+    return request.blueprint or MODULE_CODE
+
+
 def index():
     if 'user_id' not in session:
         return redirect(url_for('login'))
 
-    perms = get_user_permissions(session['user_id'], 'SRV01')
+    code = _code()
+    perms = get_user_permissions(session['user_id'], code)
     page = int(request.args.get('page', 1))
     source_type = request.args.get('source_type')
     service_type_id = request.args.get('service_type_id', type=int)
@@ -21,15 +31,18 @@ def index():
     data, total = model.get_service_records(
         page, source_type=source_type,
         service_type_id=service_type_id,
-        billed_status=billed_status
+        billed_status=billed_status,
+        module_code=code
     )
 
     # Check if user is approver
-    config = get_module_config('SRV01')
+    config = get_module_config(code)
     user_id = session.get('user_id')
     is_approver = str(config.get('approver_id', '')) == str(user_id) or session.get('is_admin')
 
     return render_template('srv01.html',
+                         mod=code,
+                         module_name=MODULE_NAMES.get(code, code),
                          data=data,
                          page=page,
                          last_page=(total + 19) // 20,
@@ -38,7 +51,6 @@ def index():
                          username=session.get('username'))
 
 
-@bp.route('/api/module/SRV01/data')
 def get_data():
     """Get paginated service records (AJAX)"""
     if 'user_id' not in session:
@@ -52,12 +64,12 @@ def get_data():
     data, total = model.get_service_records(
         page, source_type=source_type,
         service_type_id=service_type_id,
-        billed_status=billed_status
+        billed_status=billed_status,
+        module_code=_code()
     )
     return jsonify({'data': data, 'total': total})
 
 
-@bp.route('/api/module/SRV01/service-types')
 def get_service_types():
     """Get service types that have custom fields configured"""
     if 'user_id' not in session:
@@ -67,7 +79,6 @@ def get_service_types():
     return jsonify({'data': data})
 
 
-@bp.route('/api/module/SRV01/fields/<int:service_type_id>')
 def get_fields(service_type_id):
     """Get field definitions for a service type"""
     if 'user_id' not in session:
@@ -77,7 +88,6 @@ def get_fields(service_type_id):
     return jsonify({'data': fields})
 
 
-@bp.route('/api/module/SRV01/record/<int:record_id>')
 def get_record(record_id):
     """Get a service record with its field values"""
     if 'user_id' not in session:
@@ -90,13 +100,13 @@ def get_record(record_id):
     return jsonify({'header': header, 'values': values})
 
 
-@bp.route('/api/module/SRV01/save', methods=['POST'])
 def save():
     """Save service record + field values"""
     if 'user_id' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'})
 
-    perms = get_user_permissions(session['user_id'], 'SRV01')
+    code = _code()
+    perms = get_user_permissions(session['user_id'], code)
     data = request.json
 
     if data.get('id') and not perms['can_edit']:
@@ -122,7 +132,7 @@ def save():
     }
 
     # Set doc_status based on approval config
-    config = get_module_config('SRV01')
+    config = get_module_config(code)
     user_id = session.get('user_id')
     is_approver = str(config.get('approver_id', '')) == str(user_id)
     is_admin = session.get('is_admin')
@@ -148,7 +158,7 @@ def save():
         if error:
             return jsonify({'success': False, 'error': error}), 400
 
-    record_id, record_number = model.save_service_record(header_data, field_values)
+    record_id, record_number = model.save_service_record(header_data, field_values, code)
     return jsonify({'success': True, 'id': record_id, 'record_number': record_number})
 
 
@@ -173,13 +183,12 @@ def _approval_blocker(header_data, field_values):
     return None
 
 
-@bp.route('/api/module/SRV01/delete', methods=['POST'])
 def delete():
     """Delete a service record"""
     if 'user_id' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'})
 
-    perms = get_user_permissions(session['user_id'], 'SRV01')
+    perms = get_user_permissions(session['user_id'], _code())
     if not perms['can_delete']:
         return jsonify({'success': False, 'error': 'No delete permission'})
 
@@ -188,13 +197,12 @@ def delete():
     return jsonify({'success': True})
 
 
-@bp.route('/api/module/SRV01/approve', methods=['POST'])
 def approve():
     """Approve a service record - only approver or admin"""
     if 'user_id' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'})
 
-    config = get_module_config('SRV01')
+    config = get_module_config(_code())
     user_id = session.get('user_id')
     is_approver = str(config.get('approver_id', '')) == str(user_id)
     is_admin = session.get('is_admin')
@@ -225,7 +233,6 @@ def approve():
     return jsonify({'success': True})
 
 
-@bp.route('/api/module/SRV01/customer-options/<customer_type>')
 def get_customer_options(customer_type):
     """Get customer or agent list for primary source selection"""
     if 'user_id' not in session:
@@ -247,7 +254,6 @@ def get_customer_options(customer_type):
     return jsonify({'data': [dict(r) for r in rows]})
 
 
-@bp.route('/api/module/SRV01/source-options/<source_type>')
 def get_source_options(source_type):
     """Get optional VCN reference options"""
     if 'user_id' not in session:
@@ -277,3 +283,30 @@ def get_source_options(source_type):
 
     conn.close()
     return jsonify({'data': []})
+
+
+# One blueprint per service module, all sharing the view functions above.
+# The blueprint name is the module code, which _code() reads back off the
+# request — that is the only thing SRV02 changes.
+_ROUTES = [
+    ('/module/{c}/',                                     'index',                index,                ['GET']),
+    ('/api/module/{c}/data',                             'get_data',             get_data,             ['GET']),
+    ('/api/module/{c}/service-types',                    'get_service_types',    get_service_types,    ['GET']),
+    ('/api/module/{c}/fields/<int:service_type_id>',     'get_fields',           get_fields,           ['GET']),
+    ('/api/module/{c}/record/<int:record_id>',           'get_record',           get_record,           ['GET']),
+    ('/api/module/{c}/save',                             'save',                 save,                 ['POST']),
+    ('/api/module/{c}/delete',                           'delete',               delete,               ['POST']),
+    ('/api/module/{c}/approve',                          'approve',              approve,              ['POST']),
+    ('/api/module/{c}/customer-options/<customer_type>', 'get_customer_options', get_customer_options, ['GET']),
+    ('/api/module/{c}/source-options/<source_type>',     'get_source_options',   get_source_options,   ['GET']),
+]
+
+
+def build_blueprint(code):
+    blueprint = Blueprint(code, __name__, template_folder='.')
+    for rule, endpoint, view, methods in _ROUTES:
+        blueprint.add_url_rule(rule.format(c=code), endpoint, view, methods=methods)
+    return blueprint
+
+
+bp = build_blueprint(MODULE_CODE)

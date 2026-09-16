@@ -2,38 +2,57 @@ from database import get_db, get_cursor
 from datetime import datetime
 
 
-def get_next_record_number():
-    """Next service record number: a plain integer, no series.
+def get_next_record_number(module_code='SRV01'):
+    """Next service record number for this module.
 
-    Starts at the admin-set start number (ADMIN > Services) and takes
-    max(existing numeric record number) + 1 after that — so deleting the newest
-    record frees its number for the next one. Legacy SRV#### numbers are left
-    alone and ignored here.
+    SRV01: a plain integer, no series. Starts at the admin-set start number
+    (ADMIN > Services) and takes max(existing numeric record number) + 1 after
+    that. Legacy SRV#### numbers are left alone and ignored here.
+
+    SRV02: the same, prefixed and starting at SRV1 — no start number to set.
+
+    Either way the number comes from max(existing) + 1 within the module, so
+    deleting the newest record frees its number for the next one.
 
     ponytail: derived from MAX() instead of a stored counter; two records saved
     at the same instant can pick the same number. Add a sequence if service
     records are ever created concurrently.
     """
-    from database import get_module_config
-    start = int((get_module_config('SRV01') or {}).get('service_start_no') or 1)
     conn = get_db()
     cur = get_cursor(conn)
+
+    if module_code == 'SRV02':
+        cur.execute(
+            "SELECT COALESCE(MAX(SUBSTRING(record_number FROM 4)::bigint), 0) AS mx "
+            "FROM service_records "
+            "WHERE module_code = 'SRV02' AND record_number ~ '^SRV[0-9]+$'"
+        )
+        highest = cur.fetchone()['mx']
+        conn.close()
+        return 'SRV%d' % (highest + 1)
+
+    from database import get_module_config
+    start = int((get_module_config('SRV01') or {}).get('service_start_no') or 1)
     cur.execute(
         "SELECT COALESCE(MAX(record_number::bigint), 0) AS mx FROM service_records "
-        "WHERE record_number ~ '^[0-9]+$'"
+        "WHERE module_code = 'SRV01' AND record_number ~ '^[0-9]+$'"
     )
     highest = cur.fetchone()['mx']
     conn.close()
     return str(max(start, highest + 1))
 
 
-def get_service_records(page=1, size=20, source_type=None, service_type_id=None, billed_status=None):
-    """Get paginated service records with filters"""
+def get_service_records(page=1, size=20, source_type=None, service_type_id=None,
+                        billed_status=None, module_code='SRV01'):
+    """Get paginated service records with filters.
+
+    Scoped to one module: SRV01 and SRV02 share this table but each lists only
+    its own records."""
     conn = get_db()
     cur = get_cursor(conn)
 
-    where_parts = []
-    params = []
+    where_parts = ["sr.module_code = %s"]
+    params = [module_code]
 
     if source_type:
         where_parts.append("sr.source_type = %s")
@@ -97,8 +116,11 @@ def get_service_record_by_id(record_id):
     return header, values
 
 
-def save_service_record(header_data, field_values):
-    """Save service record header + EAV values"""
+def save_service_record(header_data, field_values, module_code='SRV01'):
+    """Save service record header + EAV values.
+
+    module_code stamps a new record with the module that created it, and picks
+    the number format. An edit never moves a record between modules."""
     conn = get_db()
     cur = get_cursor(conn)
 
@@ -131,16 +153,17 @@ def save_service_record(header_data, field_values):
         # Delete existing values and re-insert
         cur.execute('DELETE FROM service_record_values WHERE service_record_id = %s', [record_id])
     else:
-        header_data['record_number'] = get_next_record_number()
+        header_data['record_number'] = get_next_record_number(module_code)
         cur.execute('''
             INSERT INTO service_records
-            (record_number, service_type_id, source_type, source_id, source_display,
+            (module_code, record_number, service_type_id, source_type, source_id, source_display,
              ref_source_type, ref_source_id, ref_source_display,
              record_date, billable_quantity, billable_uom, doc_status,
              created_by, created_date, remarks)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         ''', [
+            module_code,
             header_data['record_number'],
             header_data.get('service_type_id'),
             header_data.get('source_type'),

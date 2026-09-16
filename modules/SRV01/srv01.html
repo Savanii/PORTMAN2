@@ -1,6 +1,8 @@
 {% extends "base.html" %}
+{# Shared by SRV01 and SRV02: same screen, different record number format.
+   `mod` is the module code the request came in on; the view always passes it. #}
 
-{% block title %}Service Recording - PORTMAN{% endblock %}
+{% block title %}{{ module_name }} - PORTMAN{% endblock %}
 
 {% block content %}
 <style>
@@ -54,8 +56,8 @@
 </style>
 
 <div class="module-header">
-    <h2>Service Recording</h2>
-    <span class="module-code">SRV01</span>
+    <h2>{{ module_name }}</h2>
+    <span class="module-code">{{ mod }}</span>
 </div>
 
 <div class="toolbar">
@@ -255,7 +257,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function loadServiceTypes() {
-    const resp = await fetch('/api/module/SRV01/service-types');
+    const resp = await fetch('/api/module/{{ mod }}/service-types');
     const json = await resp.json();
     serviceTypesData = json.data || [];
     const sel = document.getElementById('serviceTypeId');
@@ -273,7 +275,7 @@ async function loadCustomerOptions() {
         return;
     }
     sel.innerHTML = '<option value="">-- Loading... --</option>';
-    const resp = await fetch(`/api/module/SRV01/customer-options/${customerType}`);
+    const resp = await fetch(`/api/module/{{ mod }}/customer-options/${customerType}`);
     const json = await resp.json();
     sel.innerHTML = '<option value="">-- Select --</option>';
     (json.data || []).forEach(c => {
@@ -289,7 +291,7 @@ async function loadRefOptions() {
         return;
     }
     sel.innerHTML = '<option value="">-- Loading... --</option>';
-    const resp = await fetch(`/api/module/SRV01/source-options/${refType}`);
+    const resp = await fetch(`/api/module/{{ mod }}/source-options/${refType}`);
     const json = await resp.json();
     sel.innerHTML = '<option value="">-- None --</option>';
     (json.data || []).forEach(opt => {
@@ -344,7 +346,7 @@ async function loadFieldDefinitions() {
     const stOpt = document.getElementById('serviceTypeId').selectedOptions[0];
     document.getElementById('billableUom').value = stOpt.dataset.uom || '';
 
-    const resp = await fetch(`/api/module/SRV01/fields/${serviceTypeId}`);
+    const resp = await fetch(`/api/module/{{ mod }}/fields/${serviceTypeId}`);
     const json = await resp.json();
     fieldDefinitions = json.data || [];
 
@@ -627,7 +629,7 @@ async function saveRecord() {
         field_values: collectFieldValues()
     };
 
-    const resp = await fetch('/api/module/SRV01/save', {
+    const resp = await fetch('/api/module/{{ mod }}/save', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)
@@ -643,7 +645,7 @@ async function saveRecord() {
 }
 
 async function editRecord(recordId) {
-    const resp = await fetch(`/api/module/SRV01/record/${recordId}`);
+    const resp = await fetch(`/api/module/{{ mod }}/record/${recordId}`);
     const json = await resp.json();
 
     if (!json.header) {
@@ -679,7 +681,7 @@ async function editRecord(recordId) {
     const stOpt = document.getElementById('serviceTypeId').selectedOptions[0];
     if (stOpt) document.getElementById('billableUom').value = stOpt.dataset.uom || h.billable_uom || '';
 
-    const fieldsResp = await fetch(`/api/module/SRV01/fields/${h.service_type_id}`);
+    const fieldsResp = await fetch(`/api/module/{{ mod }}/fields/${h.service_type_id}`);
     const fieldsJson = await fieldsResp.json();
     fieldDefinitions = fieldsJson.data || [];
 
@@ -694,7 +696,7 @@ async function editRecord(recordId) {
 async function approveRecord(recordId) {
     if (!confirm('Approve this service record?')) return;
 
-    const resp = await fetch('/api/module/SRV01/approve', {
+    const resp = await fetch('/api/module/{{ mod }}/approve', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({id: recordId})
@@ -711,7 +713,7 @@ async function approveRecord(recordId) {
 async function deleteRecord(recordId) {
     if (!confirm('Delete this service record?')) return;
 
-    const resp = await fetch('/api/module/SRV01/delete', {
+    const resp = await fetch('/api/module/{{ mod }}/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({id: recordId})
@@ -728,12 +730,12 @@ async function deleteRecord(recordId) {
 function applyFilters() {
     const source = document.getElementById('filterSource').value;
     const billed = document.getElementById('filterBilled').value;
-    let url = '/module/SRV01/?';
+    let url = '/module/{{ mod }}/?';
     if (source) url += `source_type=${source}&`;
     if (billed) url += `billed_status=${billed}&`;
     window.location.href = url;
 }
 
-try { addToRecent('SRV01', 'Service Recording'); } catch(e) {}
+try { addToRecent('{{ mod }}', '{{ module_name }}'); } catch(e) {}
 </script>
 {% endblock %}
