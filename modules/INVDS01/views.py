@@ -27,18 +27,24 @@ def view():
         return render_template('no_access.html'), 403
     return render_template('invds01.html', permissions=perms)
 
+def _table():
+    """Which master this request is for: ?kind=proforma picks the pro-forma
+    series, anything else the invoice series."""
+    return model.PROFORMA_TABLE if request.args.get('kind') == 'proforma' else model.TABLE
+
+
 @bp.route('/api/module/INVDS01/data')
 @login_required
 def get_data():
     page = int(request.args.get('page', 1))
     size = int(request.args.get('size', 20))
-    data, total = model.get_data(page, size)
+    data, total = model.get_data(page, size, _table())
     return jsonify({'data': data, 'last_page': (total + size - 1) // size, 'total': total})
 
 @bp.route('/api/module/INVDS01/all')
 @login_required
 def get_all():
-    return jsonify(model.get_all())
+    return jsonify(model.get_all(_table()))
 
 @bp.route('/api/module/INVDS01/save', methods=['POST'])
 @login_required
@@ -50,7 +56,10 @@ def save():
         return jsonify({'error': 'No permission to add'}), 403
     if not is_new and not perms.get('can_edit'):
         return jsonify({'error': 'No permission to edit'}), 403
-    row_id = model.save_data(data)
+    try:
+        row_id = model.save_data(data, _table())
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     return jsonify({'success': True, 'id': row_id})
 
 @bp.route('/api/module/INVDS01/delete', methods=['POST'])
@@ -59,5 +68,5 @@ def delete():
     perms = get_perms()
     if not perms.get('can_delete'):
         return jsonify({'error': 'No permission to delete'}), 403
-    model.delete_data(request.json.get('id'))
+    model.delete_data(request.json.get('id'), _table())
     return jsonify({'success': True})

@@ -419,12 +419,50 @@ def _amount_in_words(amount):
 # same name if these ever change.
 _PI_GSTIN = '27AAGCJ3665D1ZK'
 _PI_PAN = 'AAGCJ3665D'
+_PI_SERIES_PREFIX = 'JJLTPL/PI'   # used when the INVDS01 pro-forma master is empty
 _PI_PAYMENT_NOTE = ('Note : Payment to be made through DD / Bankers Cheque/RTGS drawn in favour of '
                     'JSW JNPT LIQUID TERMINAL PRIVATE LIMITED, (Axis Bank Ltd- Kalina Branch, '
                     'Mumbai – 400098, Escrow Account- 924020046923953, IFS CODE- UTIB0000776)')
 
 
-def _proforma_ctx(customer_type, customer_id, vcn_id, picked):
+def _proforma_fy(now=None):
+    """Financial year label on the pro-forma reference, e.g. 25-26 (Apr-Mar)."""
+    now = now or datetime.now()
+    return (f'{now.year % 100:02d}-{(now.year + 1) % 100:02d}' if now.month >= 4
+            else f'{(now.year - 1) % 100:02d}-{now.year % 100:02d}')
+
+
+def proforma_series(cur=None):
+    """Pro-forma doc series from INVDS01, default first. Empty when the master
+    has no rows — the caller then falls back to the legacy JJLTPL/PI prefix."""
+    conn = None if cur is not None else get_db()
+    if conn is not None:
+        cur = get_cursor(conn)
+    try:
+        cur.execute('''SELECT id, name, prefix, is_default FROM proforma_doc_series
+                       ORDER BY is_default DESC, name''')
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception:
+        cur.connection.rollback()
+        rows = []
+    if conn is not None:
+        conn.close()
+    return rows
+
+
+def _proforma_ref(vessel, series, number):
+    """The reference printed on the pro-forma.
+
+    `series` is a prefix from the INVDS01 pro-forma master and `number` the one
+    the user typed on the billables screen. A link without them — a bookmark
+    from before this screen asked — keeps the old VCN-derived reference rather
+    than inventing a number."""
+    prefix = (series or '').strip().rstrip('/') or _PI_SERIES_PREFIX
+    tail = (number or '').strip() or vessel['vcn_doc_num']
+    return f'{prefix}/{_proforma_fy()}/{tail}'
+
+
+def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, number=None):
     """Build the pro-forma document context, or (None, error, status).
 
     Shared by the preview, the PDF and the mail send so all three are the same
@@ -464,11 +502,9 @@ def _proforma_ctx(customer_type, customer_id, vcn_id, picked):
     total = round(subtotal + sum(t['amount'] for t in tax_rows), 2)
 
     now = datetime.now()
-    fy = (f'{now.year % 100}-{(now.year + 1) % 100:02d}' if now.month >= 4
-          else f'{(now.year - 1) % 100}-{now.year % 100:02d}')
-    # ponytail: ref derives from the VCN doc num (stateless); add a numbered
-    # pro forma register if finance wants sequential PI numbers
-    ref_no = f"JJLTPL/PI/{fy}/{vessel['vcn_doc_num']}"
+    # ponytail: the number is typed in and nothing is reserved, so two users can
+    # print the same one. Add a pro forma register if finance needs them unique.
+    ref_no = _proforma_ref(vessel, series, number)
 
     return {
         'vessel': vessel,
@@ -518,9 +554,25 @@ def _proforma_filename(ctx):
 
 
 def _proforma_qs():
-    """Carry the ticked-line filter through to the PDF and send endpoints."""
-    picked = request.args.get('l')
-    return ('?l=' + quote(picked)) if picked else ''
+    """Carry the ticked lines and the chosen series/number through to the PDF
+    and send endpoints, so all three render the same document."""
+    parts = [(k, request.args.get(k)) for k in ('l', 's', 'n')]
+    parts = [f'{k}={quote(v)}' for k, v in parts if v]
+    return ('?' + '&'.join(parts)) if parts else ''
+
+
+@bp.route('/api/module/FIN01/proforma-series')
+def get_proforma_series():
+    """Series the pro-forma dialog offers, plus the FY the reference will
+    carry — the preview on screen is then built from the same pieces the
+    document is, and cannot drift from it."""
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+    rows = proforma_series()
+    if not rows:
+        rows = [{'id': None, 'name': 'Pro Forma Invoice',
+                 'prefix': _PI_SERIES_PREFIX, 'is_default': True}]
+    return jsonify({'data': rows, 'financial_year': _proforma_fy()})
 
 
 @bp.route('/module/FIN01/proforma/<customer_type>/<int:customer_id>/<int:vcn_id>')
@@ -531,7 +583,8 @@ def proforma_invoice(customer_type, customer_id, vcn_id):
         return redirect(url_for('login'))
 
     ctx, err, status = _proforma_ctx(customer_type, customer_id, vcn_id,
-                                     request.args.get('l'))
+                                     request.args.get('l'),
+                                     request.args.get('s'), request.args.get('n'))
     if err:
         return err, status
 
@@ -556,7 +609,8 @@ def proforma_invoice_pdf(customer_type, customer_id, vcn_id):
         return redirect(url_for('login'))
 
     ctx, err, status = _proforma_ctx(customer_type, customer_id, vcn_id,
-                                     request.args.get('l'))
+                                     request.args.get('l'),
+                                     request.args.get('s'), request.args.get('n'))
     if err:
         return err, status
 
@@ -581,7 +635,8 @@ def send_proforma(customer_type, customer_id, vcn_id):
         return jsonify({'success': False, 'error': 'No permission to send invoices'}), 403
 
     ctx, err, status = _proforma_ctx(customer_type, customer_id, vcn_id,
-                                     request.args.get('l'))
+                                     request.args.get('l'),
+                                     request.args.get('s'), request.args.get('n'))
     if err:
         return jsonify({'success': False, 'error': err}), status
 

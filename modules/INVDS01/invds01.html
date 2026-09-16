@@ -15,71 +15,116 @@
     <div class="row-info">Rows: <span id="rowCount">0</span> / <span id="totalCount">0</span></div>
 </div>
 
-<div id="table"></div>
+<div style="display:flex;gap:6px;margin-bottom:10px;">
+    <button class="btn" id="tab-invoice" onclick="showKind('invoice')">Invoice Series</button>
+    <button class="btn" id="tab-proforma" onclick="showKind('proforma')">Pro Forma Series</button>
+</div>
+
+<div id="invoice-pane">
+    <p style="font-size:11px;color:#718096;margin:0 0 8px;">
+        <b>Start At</b> is the cut-off this series numbers from: the next invoice takes the
+        higher of the running sequence and this number. Leave blank for no cut-off.
+    </p>
+    <div id="table"></div>
+</div>
+
+<div id="proforma-pane" style="display:none;">
+    <p style="font-size:11px;color:#718096;margin:0 0 8px;">
+        Series offered when printing a pro-forma invoice in FIN01. No Start At —
+        the pro-forma number is typed in at print time and nothing is reserved.
+    </p>
+    <div id="pfTable"></div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
     addToRecent('INVDS01', 'Invoice Doc Series Master');
-    let table;
     const canEdit = {{ permissions.can_edit|default(0) }} || {{ permissions.can_add|default(0) }};
+    let kind = 'invoice';           // which grid the toolbar buttons act on
+    const grids = {};               // kind -> Tabulator
 
-    function initTable() {
-        table = new Tabulator("#table", {
-            height: "calc(100vh - 160px)",
-            layout: "fitColumns",
-            columns: [
-                {formatter: "rowSelection", titleFormatter: "rowSelection", hozAlign: "center", headerSort: false, width: 40},
-                {title: "Series Name", field: "name", editor: canEdit ? "input" : false},
-                {title: "Prefix", field: "prefix", width: 140,
-                    editor: canEdit ? "input" : false,
-                    formatter: function(cell) {
-                        const v = cell.getValue() || '';
-                        return v ? `<code style="font-size:11px;">${v}</code>` : '';
-                    },
-                    editorParams: {
-                        elementAttributes: {style: "text-transform:uppercase;"}
-                    }
+    const URL = k => `/api/module/INVDS01/data${k === 'proforma' ? '?kind=proforma' : ''}`;
+    const api = (path, k) => `/api/module/INVDS01/${path}${k === 'proforma' ? '?kind=proforma' : ''}`;
+
+    // Both masters are the same grid; the invoice one carries the extra
+    // Start At column and the two must not share a radio group.
+    function buildTable(el, k) {
+        const columns = [
+            {formatter: "rowSelection", titleFormatter: "rowSelection", hozAlign: "center", headerSort: false, width: 40},
+            {title: "Series Name", field: "name", editor: canEdit ? "input" : false},
+            {title: "Prefix", field: "prefix", width: 140,
+                editor: canEdit ? "input" : false,
+                formatter: function(cell) {
+                    const v = cell.getValue() || '';
+                    return v ? `<code style="font-size:11px;">${v}</code>` : '';
                 },
-                {title: "Default", field: "is_default", hozAlign: "center", width: 80, headerSort: false,
-                    formatter: function(cell) {
-                        const checked = cell.getValue() ? 'checked' : '';
-                        return `<input type="radio" name="default_inv_ds" ${checked} ${canEdit ? '' : 'disabled'}>`;
-                    },
-                    cellClick: function(e, cell) {
-                        if (!canEdit) return;
-                        if (e.target.tagName !== 'INPUT') return;
-                        table.getRows().forEach(r => r.update({is_default: false}));
-                        cell.getRow().update({is_default: true});
-                    }
+                editorParams: {
+                    elementAttributes: {style: "text-transform:uppercase;"}
                 }
-            ],
+            }
+        ];
+        if (k === 'invoice') {
+            columns.push({title: "Start At", field: "start_seq", width: 110, hozAlign: "right",
+                editor: canEdit ? "number" : false,
+                editorParams: {min: 1, step: 1},
+                formatter: cell => cell.getValue() == null ? '<span style="color:#a0aec0;">—</span>' : cell.getValue()
+            });
+        }
+        columns.push({title: "Default", field: "is_default", hozAlign: "center", width: 80, headerSort: false,
+            formatter: function(cell) {
+                const checked = cell.getValue() ? 'checked' : '';
+                return `<input type="radio" name="default_${k}_ds" ${checked} ${canEdit ? '' : 'disabled'}>`;
+            },
+            cellClick: function(e, cell) {
+                if (!canEdit) return;
+                if (e.target.tagName !== 'INPUT') return;
+                grids[k].getRows().forEach(r => r.update({is_default: false}));
+                cell.getRow().update({is_default: true});
+            }
+        });
+
+        const t = new Tabulator(el, {
+            height: "calc(100vh - 230px)",
+            layout: "fitColumns",
+            columns: columns,
             pagination: true,
             paginationMode: "remote",
             paginationSize: 20,
-            ajaxURL: "/api/module/INVDS01/data",
+            ajaxURL: URL(k),
             ajaxResponse: function(url, params, response) {
-                document.getElementById('rowCount').textContent = response.data.length;
-                document.getElementById('totalCount').textContent = response.total;
+                if (k === kind) {
+                    document.getElementById('rowCount').textContent = response.data.length;
+                    document.getElementById('totalCount').textContent = response.total;
+                }
                 return response;
             },
             selectable: true
         });
-        if (localStorage.getItem('theme') === 'dark') {
-            document.getElementById('table').classList.add('tabulator-dark');
-        }
+        if (localStorage.getItem('theme') === 'dark') el.classList.add('tabulator-dark');
+        return t;
     }
 
-    function addRow() { table.addRow({}, false); }
+    function showKind(k) {
+        kind = k;
+        document.getElementById('invoice-pane').style.display = k === 'invoice' ? 'block' : 'none';
+        document.getElementById('proforma-pane').style.display = k === 'proforma' ? 'block' : 'none';
+        ['invoice', 'proforma'].forEach(x => {
+            document.getElementById('tab-' + x).className = 'btn' + (x === k ? ' btn-primary' : '');
+        });
+        grids[k].setData(URL(k));
+    }
+
+    function addRow() { grids[kind].addRow({}, false); }
 
     function deleteSelected() {
-        const selected = table.getSelectedRows();
+        const selected = grids[kind].getSelectedRows();
         if (selected.length === 0) { alert('Select rows to delete'); return; }
         if (!confirm(`Delete ${selected.length} row(s)?`)) return;
         selected.forEach(row => {
             const id = row.getData().id;
             if (id) {
-                fetch("/api/module/INVDS01/delete", {
+                fetch(api('delete', kind), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({id: id})
@@ -90,25 +135,28 @@
     }
 
     async function saveAll() {
-        const rows = table.getRows();
-        for (const row of rows) {
+        const k = kind;
+        for (const row of grids[k].getRows()) {
             const data = row.getData();
             if (!data.name || !data.prefix) continue;
-            const res = await fetch("/api/module/INVDS01/save", {
+            const res = await fetch(api('save', k), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data)
             });
             const result = await res.json();
+            if (result.error) { alert(`${data.name || 'Row'}: ${result.error}`); return; }
             if (result.id) row.update({id: result.id});
         }
-        table.setData("/api/module/INVDS01/data");
+        grids[k].setData(URL(k));
     }
 
     document.addEventListener('keydown', function(e) {
         if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveAll(); }
     });
 
-    initTable();
+    grids.invoice = buildTable(document.getElementById('table'), 'invoice');
+    grids.proforma = buildTable(document.getElementById('pfTable'), 'proforma');
+    showKind('invoice');
 </script>
 {% endblock %}

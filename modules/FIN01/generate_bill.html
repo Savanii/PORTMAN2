@@ -182,6 +182,26 @@
     </button>
 </div>
 
+<!-- Pro forma number + series, asked before the document is produced -->
+<div id="pfModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:900;align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:6px;padding:18px 20px;min-width:340px;box-shadow:0 10px 30px rgba(0,0,0,.25);">
+    <h3 style="margin:0 0 4px;font-size:14px;">Pro Forma Invoice</h3>
+    <div id="pfLineCount" style="font-size:11px;color:#718096;margin-bottom:12px;"></div>
+    <label style="display:block;font-size:11px;font-weight:600;color:#4a5568;margin-bottom:3px;">Series</label>
+    <select id="pfSeries" onchange="updatePfPreview()" style="width:100%;padding:6px;font-size:12px;margin-bottom:10px;"></select>
+    <label style="display:block;font-size:11px;font-weight:600;color:#4a5568;margin-bottom:3px;">Number</label>
+    <input id="pfNumber" type="text" oninput="updatePfPreview()"
+           onkeydown="if(event.key==='Enter')confirmProforma();"
+           placeholder="e.g. 0484" style="width:100%;padding:6px;font-size:12px;margin-bottom:10px;">
+    <div style="font-size:11px;color:#718096;">Will print as</div>
+    <code id="pfPreview" style="display:block;font-size:13px;padding:6px 8px;background:#f7fafc;border:1px solid #e2e8f0;border-radius:4px;margin:3px 0 14px;"></code>
+    <div style="display:flex;gap:6px;justify-content:flex-end;">
+      <button class="btn" onclick="closePfModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmProforma()">Open Pro Forma</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let billableData = null;
 let customerData = null;
@@ -300,7 +320,7 @@ function renderVessels(vessels) {
                 <td style="text-align:right" id="amt-${vi}-${li}">₹${(l.amount||0).toFixed(2)}</td>
               </tr>` : `
               <tr>
-                <td><input type="checkbox" class="pf-chk" data-vi="${vi}" data-li="${li}" checked></td>
+                <td><input type="checkbox" class="pf-chk" data-vi="${vi}" data-li="${li}"></td>
                 <td>${l.parcel_no||''}</td><td>${l.cargo_name||''}</td>
                 <td>${l.service_name} <small>(${l.service_code})</small></td>
                 <td style="text-align:right">${(+l.qty).toFixed(3)} ${l.uom}</td>
@@ -329,7 +349,11 @@ function renderVessels(vessels) {
     recalcSel();
 }
 
-function openProforma(vi, ct, cid, vcnId) {
+// ── Pro forma: pick the series and type the number before printing ─────────
+let pfSeries = null;          // {data: [...], financial_year: '25-26'}
+let pfPending = null;         // the vessel/lines the dialog is about to print
+
+async function openProforma(vi, ct, cid, vcnId) {
     const lines = ((window._vessels || [])[vi] || {}).lines || [];
     const keys = [];
     document.querySelectorAll(`.bl-chk[data-vi="${vi}"]:checked, .pf-chk[data-vi="${vi}"]:checked`).forEach(chk => {
@@ -337,7 +361,45 @@ function openProforma(vi, ct, cid, vcnId) {
         if (l) keys.push(`${l.cargo_source_type}:${l.cargo_source_id}:${l.service_type_id}`);
     });
     if (!keys.length) { alert('Tick at least one line for the pro forma invoice.'); return; }
-    window.open(`/module/FIN01/proforma/${ct}/${cid}/${vcnId}?l=${encodeURIComponent(keys.join(','))}`, '_blank');
+
+    if (!pfSeries) {
+        const resp = await fetch('/api/module/FIN01/proforma-series');
+        pfSeries = await resp.json();
+    }
+    pfPending = {ct, cid, vcnId, keys};
+
+    document.getElementById('pfSeries').innerHTML = (pfSeries.data || []).map(sr =>
+        `<option value="${sr.prefix}" ${sr.is_default ? 'selected' : ''}>${sr.name} (${sr.prefix})</option>`).join('');
+    document.getElementById('pfNumber').value = '';
+    document.getElementById('pfLineCount').textContent =
+        `${keys.length} line${keys.length === 1 ? '' : 's'} selected`;
+    updatePfPreview();
+    document.getElementById('pfModal').style.display = 'flex';
+    document.getElementById('pfNumber').focus();
+}
+
+// Preview is built from the same prefix + FY the server puts on the document.
+function updatePfPreview() {
+    const prefix = (document.getElementById('pfSeries').value || '').replace(/\/+$/, '');
+    const number = document.getElementById('pfNumber').value.trim();
+    const fy = (pfSeries && pfSeries.financial_year) || '';
+    const el = document.getElementById('pfPreview');
+    el.textContent = `${prefix}/${fy}/${number || '____'}`;
+    el.style.color = number ? '#1a202c' : '#a0aec0';
+}
+
+function closePfModal() { document.getElementById('pfModal').style.display = 'none'; }
+
+function confirmProforma() {
+    if (!pfPending) return;
+    const number = document.getElementById('pfNumber').value.trim();
+    if (!number) { alert('Enter the pro forma invoice number.'); return; }
+    const {ct, cid, vcnId, keys} = pfPending;
+    const qs = `l=${encodeURIComponent(keys.join(','))}`
+             + `&s=${encodeURIComponent(document.getElementById('pfSeries').value)}`
+             + `&n=${encodeURIComponent(number)}`;
+    closePfModal();
+    window.open(`/module/FIN01/proforma/${ct}/${cid}/${vcnId}?${qs}`, '_blank');
 }
 
 function toggleVessel(vi) {

@@ -44,6 +44,20 @@ def lookup_seed(seed_type, doc_series='', financial_year=''):
     return int(row['start_seq']) if row else None
 
 
+def series_start_seq(cur, prefix):
+    """INVDS01's Start At for one series prefix, or None.
+
+    Tolerates a pre-migration database the same way lookup_seed does."""
+    try:
+        cur.execute('SELECT MAX(start_seq) AS start_seq FROM invoice_doc_series WHERE UPPER(prefix)=%s',
+                    [(prefix or '').strip().upper()])
+        row = cur.fetchone()
+    except Exception:
+        cur.connection.rollback()
+        return None
+    return int(row['start_seq']) if row and row['start_seq'] else None
+
+
 def next_from_seed(current_max, seed):
     """Next sequence number: the natural increment, floored at the seed."""
     nxt = int(current_max or 0) + 1
@@ -51,12 +65,17 @@ def next_from_seed(current_max, seed):
 
 
 def next_invoice_seq(cur, doc_series, financial_year):
-    """Next invoice doc_series_seq for one series + FY, seed floor applied."""
+    """Next invoice doc_series_seq for one series + FY, seed floor applied.
+
+    Two places can set a floor — the locked go-live cutover_seed and INVDS01's
+    per-series Start At. The higher wins, so configuring one can never pull
+    numbering back below the other."""
     cur.execute('SELECT MAX(doc_series_seq) AS max FROM invoice_header WHERE doc_series=%s AND financial_year=%s',
                 [doc_series, financial_year])
     row = cur.fetchone()
-    return next_from_seed(row['max'] if row else 0,
-                          lookup_seed('invoice', doc_series, financial_year))
+    floors = [f for f in (lookup_seed('invoice', doc_series, financial_year),
+                          series_start_seq(cur, doc_series)) if f]
+    return next_from_seed(row['max'] if row else 0, max(floors) if floors else None)
 
 
 def would_overbill(already_billed, quantity, cap, tol=1e-6):
