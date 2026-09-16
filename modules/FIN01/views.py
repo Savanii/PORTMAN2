@@ -419,17 +419,10 @@ def _amount_in_words(amount):
 # same name if these ever change.
 _PI_GSTIN = '27AAGCJ3665D1ZK'
 _PI_PAN = 'AAGCJ3665D'
-_PI_SERIES_PREFIX = 'JJLTPL/PI'   # used when the INVDS01 pro-forma master is empty
+_PI_SERIES_PREFIX = 'JJLTPL/PI/'   # used when the INVDS01 pro-forma master is empty
 _PI_PAYMENT_NOTE = ('Note : Payment to be made through DD / Bankers Cheque/RTGS drawn in favour of '
                     'JSW JNPT LIQUID TERMINAL PRIVATE LIMITED, (Axis Bank Ltd- Kalina Branch, '
                     'Mumbai – 400098, Escrow Account- 924020046923953, IFS CODE- UTIB0000776)')
-
-
-def _proforma_fy(now=None):
-    """Financial year label on the pro-forma reference, e.g. 25-26 (Apr-Mar)."""
-    now = now or datetime.now()
-    return (f'{now.year % 100:02d}-{(now.year + 1) % 100:02d}' if now.month >= 4
-            else f'{(now.year - 1) % 100:02d}-{now.year % 100:02d}')
 
 
 def proforma_series(cur=None):
@@ -451,15 +444,18 @@ def proforma_series(cur=None):
 
 
 def _proforma_ref(vessel, series, number):
-    """The reference printed on the pro-forma.
+    """The reference printed on the pro-forma: the prefix with the number
+    appended to it, exactly as typed.
 
-    `series` is a prefix from the INVDS01 pro-forma master and `number` the one
-    the user typed on the billables screen. A link without them — a bookmark
-    from before this screen asked — keeps the old VCN-derived reference rather
-    than inventing a number."""
-    prefix = (series or '').strip().rstrip('/') or _PI_SERIES_PREFIX
+    Nothing is inserted between the two — no separator, and no financial year.
+    The prefix from the INVDS01 pro-forma master carries whatever the series
+    needs ('JJLTPL/PI-26-27-'), so finance shapes the whole reference from that
+    one field instead of working around a format baked in here. A link with no
+    number — a bookmark from before this screen asked for one — falls back to
+    the VCN doc number rather than inventing one."""
+    prefix = (series or '').strip() or _PI_SERIES_PREFIX
     tail = (number or '').strip() or vessel['vcn_doc_num']
-    return f'{prefix}/{_proforma_fy()}/{tail}'
+    return f'{prefix}{tail}'
 
 
 def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, number=None):
@@ -563,16 +559,15 @@ def _proforma_qs():
 
 @bp.route('/api/module/FIN01/proforma-series')
 def get_proforma_series():
-    """Series the pro-forma dialog offers, plus the FY the reference will
-    carry — the preview on screen is then built from the same pieces the
-    document is, and cannot drift from it."""
+    """Series the pro-forma dialog offers. The preview on screen is built from
+    the same prefix the document is, so the two cannot drift apart."""
     if 'user_id' not in session:
         return jsonify({'error': 'Not logged in'}), 401
     rows = proforma_series()
     if not rows:
         rows = [{'id': None, 'name': 'Pro Forma Invoice',
                  'prefix': _PI_SERIES_PREFIX, 'is_default': True}]
-    return jsonify({'data': rows, 'financial_year': _proforma_fy()})
+    return jsonify({'data': rows})
 
 
 @bp.route('/module/FIN01/proforma/<customer_type>/<int:customer_id>/<int:vcn_id>')

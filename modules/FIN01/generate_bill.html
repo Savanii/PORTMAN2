@@ -350,7 +350,7 @@ function renderVessels(vessels) {
 }
 
 // ── Pro forma: pick the series and type the number before printing ─────────
-let pfSeries = null;          // {data: [...], financial_year: '25-26'}
+let pfSeries = null;          // {data: [{name, prefix, is_default}, ...]}
 let pfPending = null;         // the vessel/lines the dialog is about to print
 
 async function openProforma(vi, ct, cid, vcnId) {
@@ -378,13 +378,13 @@ async function openProforma(vi, ct, cid, vcnId) {
     document.getElementById('pfNumber').focus();
 }
 
-// Preview is built from the same prefix + FY the server puts on the document.
+// The number is appended to the prefix exactly as the server does it — the
+// series carries its own separator and year, so nothing is inserted here.
 function updatePfPreview() {
-    const prefix = (document.getElementById('pfSeries').value || '').replace(/\/+$/, '');
+    const prefix = document.getElementById('pfSeries').value || '';
     const number = document.getElementById('pfNumber').value.trim();
-    const fy = (pfSeries && pfSeries.financial_year) || '';
     const el = document.getElementById('pfPreview');
-    el.textContent = `${prefix}/${fy}/${number || '____'}`;
+    el.textContent = `${prefix}${number || '____'}`;
     el.style.color = number ? '#1a202c' : '#a0aec0';
 }
 

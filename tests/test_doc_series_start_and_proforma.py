@@ -81,22 +81,23 @@ def test_table_name_is_not_free_text():
 
 # ── Pro-forma reference ─────────────────────────────────────────────────────
 
-def test_ref_uses_the_chosen_series_and_typed_number():
+def test_ref_is_the_prefix_with_the_number_appended():
+    """No separator and no year are inserted — the series prefix owns the whole
+    shape of the reference, so finance can change it without a code change."""
     vessel = {'vcn_doc_num': 'VCN-1'}
-    fy = fin_views._proforma_fy()
-    assert fin_views._proforma_ref(vessel, 'JJLTPL/PI', '0484') == f'JJLTPL/PI/{fy}/0484'
-    # A trailing slash on the prefix must not double up.
-    assert fin_views._proforma_ref(vessel, 'JJLTPL/PI/', '0484') == f'JJLTPL/PI/{fy}/0484'
+    assert fin_views._proforma_ref(vessel, 'JJLTPL/PI-26-27-', '0484') == 'JJLTPL/PI-26-27-0484'
+    assert fin_views._proforma_ref(vessel, 'JJLTPL/PI/', '0484') == 'JJLTPL/PI/0484'
+    # Surrounding whitespace on the stored prefix must not reach the document.
+    assert fin_views._proforma_ref(vessel, '  ZZPF/  ', ' 7 ') == 'ZZPF/7'
     # An old link with no series/number keeps the VCN-derived reference.
-    assert fin_views._proforma_ref(vessel, None, None) == f'JJLTPL/PI/{fy}/VCN-1'
-    assert fin_views._proforma_ref(vessel, 'ZZPF', None) == f'ZZPF/{fy}/VCN-1'
+    assert fin_views._proforma_ref(vessel, None, None) == 'JJLTPL/PI/VCN-1'
+    assert fin_views._proforma_ref(vessel, 'ZZPF-', None) == 'ZZPF-VCN-1'
 
 
-def test_financial_year_runs_april_to_march():
-    from datetime import datetime
-    assert fin_views._proforma_fy(datetime(2026, 4, 1)) == '26-27'
-    assert fin_views._proforma_fy(datetime(2027, 3, 31)) == '26-27'
-    assert fin_views._proforma_fy(datetime(2026, 3, 31)) == '25-26'
+def test_nothing_adds_a_financial_year():
+    """The year lives in the prefix now; a stray FY here would double it up."""
+    assert not hasattr(fin_views, '_proforma_fy')
+    assert 'financial_year' not in GEN_BILL
 
 
 # ── Billables screen ────────────────────────────────────────────────────────
@@ -113,5 +114,5 @@ def test_billable_lines_start_unticked():
 
 def test_number_is_required_before_the_document_opens():
     assert "Enter the pro forma invoice number." in GEN_BILL
-    # and the preview is shown from the series the server supplied
-    assert 'pfPreview' in GEN_BILL and 'financial_year' in GEN_BILL
+    # and the preview is shown from the prefix the server supplied
+    assert 'pfPreview' in GEN_BILL and 'proforma-series' in GEN_BILL

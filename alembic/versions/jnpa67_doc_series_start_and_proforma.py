@@ -8,8 +8,10 @@
 
 2. proforma_doc_series — name, prefix and default, no start number. Pro-forma
    numbers are typed in by the user at print time (nothing is persisted, so
-   there is no sequence to seed). Seeded with the JJLTPL/PI prefix that was
-   hard-coded in FIN01 until now, so existing documents keep their format.
+   there is no sequence to seed). The typed number is appended to the prefix
+   verbatim, so the prefix carries its own separator and financial year —
+   'JJLTPL/PI-26-27-' + '0484'. Seeded from the prefix FIN01 hard-coded until
+   now; finance edits it in INVDS01 each year rather than waiting on a release.
 
 Revision ID: jnpa67_doc_series_start
 Revises: jnpa66_service_records_module
@@ -39,7 +41,7 @@ def upgrade() -> None:
     # reference it always did.
     op.execute('''
         INSERT INTO proforma_doc_series (name, prefix, is_default)
-        SELECT 'Pro Forma Invoice', 'JJLTPL/PI', TRUE
+        SELECT 'Pro Forma Invoice', 'JJLTPL/PI/', TRUE
         WHERE NOT EXISTS (SELECT 1 FROM proforma_doc_series)
     ''')
 
