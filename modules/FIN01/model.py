@@ -823,7 +823,14 @@ _CARGO_GATE = ('Closed', 'Partial Close')
 
 # Order the billables screen and the pro-forma list services in: cargo handling,
 # then infrastructure, then the extras. Rows for one service stay together.
-_SERVICE_DISPLAY_ORDER = ['CHGU01', 'CHGL01', 'INFM01', 'MLAC01', 'TOLL01']
+_SERVICE_DISPLAY_ORDER = ['CHGU01', 'CHGL01', 'INFM01', 'MLAC01', 'TOLL01', 'SHGW01']
+
+# Shore Gangway is a vessel service, not a cargo one: one flat charge per
+# vessel for the payer being billed, rather than something each parcel yields.
+# Kept out of parcel_charge_codes for that reason — that function drives the
+# per-parcel picker counts and Admin Cutover.
+_VESSEL_CHARGE_CODE = 'SHGW01'
+_VESSEL_CHARGE_QTY = 1.0
 
 
 def parcel_charge_codes(src, equipment_names, toll_applicable):
@@ -906,6 +913,49 @@ def verify_user_password(user_id, password):
     return ok
 
 
+def _add_vessel_charge(vessels, first_parcel, svc, billed, rates_by_service):
+    """Append one Shore Gangway line to each vessel, for the payer this screen
+    is for.
+
+    Flat quantity, agreement rate, no cargo — it is charged for the vessel, not
+    for what came off it. It hangs off the vessel's first parcel purely so the
+    existing parcel_charge_billed ledger tracks it: once that parcel + SHGW01
+    reads as billed, the line stops appearing, exactly like a cargo charge that
+    has been fully billed. No new table, and bill generation needs no change.
+    """
+    st = svc.get(_VESSEL_CHARGE_CODE)
+    if not st:
+        return                      # service not seeded on this database
+    rate_info = rates_by_service.get(st['id'])
+    rate = float(rate_info['rate']) if rate_info and rate_info.get('rate') is not None else 0.0
+
+    for vcn_id, (src, parcel_id) in first_parcel.items():
+        v = vessels.get(vcn_id)
+        if v is None:
+            continue
+        remaining = round(_VESSEL_CHARGE_QTY - billed.get((src, parcel_id, st['id']), 0.0), 3)
+        if remaining <= 1e-6:
+            continue                # already billed for this vessel
+        amount = round(remaining * rate, 2)
+        v['lines'].append({
+            'cargo_source_type': src, 'cargo_source_id': parcel_id,
+            'parcel_no': '', 'service_type_id': st['id'],
+            'service_code': _VESSEL_CHARGE_CODE, 'service_name': st['service_name'],
+            'cargo_name': '', 'qty': remaining,
+            # No declared or handled quantity to speak of — the screen shows a
+            # dash rather than pretending the LUEU01 logbook is missing.
+            'declared_qty': None, 'actual_qty': None, 'is_vessel_charge': True,
+            'uom': st['uom'] or 'OTH', 'rate': rate, 'amount': amount,
+            'sac_code': st['sac_code'] or '', 'gst_rate_id': st['gst_rate_id'],
+            'cgst_rate': _to_float(st['cgst_rate']) if st['cgst_rate'] is not None else None,
+            'sgst_rate': _to_float(st['sgst_rate']) if st['sgst_rate'] is not None else None,
+            'igst_rate': _to_float(st['igst_rate']) if st['igst_rate'] is not None else None,
+            'is_tds': st['is_tds'], 'tds_percent': float(st['tds_percent'] or 0),
+            'is_tcs': st['is_tcs'], 'tcs_percent': float(st['tcs_percent'] or 0),
+        })
+        v['total_amount'] = round(v['total_amount'] + amount, 2)
+
+
 def get_customer_billables(customer_type, customer_id):
     """Billable charges for a customer's parcels, grouped by vessel. Read-only.
     Bills the payer (importer_name). Two stages per vessel:
@@ -931,7 +981,8 @@ def get_customer_billables(customer_type, customer_id):
                           g.cgst_rate, g.sgst_rate, g.igst_rate
                    FROM finance_service_types s
                    LEFT JOIN gst_rates g ON g.id = s.gst_rate_id
-                   WHERE s.service_code IN ('CHGU01','CHGL01','INFM01','MLAC01','TOLL01')""")
+                   WHERE s.service_code IN ('CHGU01','CHGL01','INFM01','MLAC01','TOLL01',
+                                            'SHGW01')""")
     svc = {r['service_code']: dict(r) for r in cur.fetchall()}
 
     cur.execute("""
@@ -994,6 +1045,9 @@ def get_customer_billables(customer_type, customer_id):
     conn.close()
 
     vessels = {}
+    # First parcel seen per vessel — the Shore Gangway charge rides on it so it
+    # lands in the same parcel_charge_billed ledger as everything else.
+    first_parcel = {}
     for p in parcels:
         src = p['src']
         stage = 'actual' if p['ldud_status'] in _CARGO_GATE else 'proforma'
@@ -1014,6 +1068,7 @@ def get_customer_billables(customer_type, customer_id):
             'stage': stage,
             'lines': [], 'total_amount': 0.0,
         })
+        first_parcel.setdefault(p['vcn_id'], (src, p['id']))
         for code, cargo_for_rate in charges:
             st = svc.get(code)
             if not st:
@@ -1045,6 +1100,8 @@ def get_customer_billables(customer_type, customer_id):
                 'is_tcs': st['is_tcs'], 'tcs_percent': float(st['tcs_percent'] or 0),
             })
             v['total_amount'] = round(v['total_amount'] + amount, 2)
+
+    _add_vessel_charge(vessels, first_parcel, svc, billed, rates_by_service)
 
     # Club each vessel's lines by service instead of the per-parcel hopscotch
     # the loop above emits (P1/handling, P1/infra, P2/handling…). sort is
