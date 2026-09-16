@@ -101,11 +101,14 @@ def test_financial_year_runs_april_to_march():
 
 # ── Billables screen ────────────────────────────────────────────────────────
 
-def test_proforma_lines_start_unticked():
-    """Nothing is pre-selected: the user chooses what the customer is shown."""
-    chk = [l for l in GEN_BILL.splitlines() if 'class="pf-chk"' in l]
-    assert chk, 'pro forma checkbox not found'
-    assert not any('checked' in l for l in chk), chk
+def test_billable_lines_start_unticked():
+    """Nothing is pre-selected on either stage — the user picks the lines that
+    go on the bill or in front of the customer, rather than unticking a screen
+    that arrived fully ticked."""
+    for cls in ('pf-chk', 'bl-chk'):
+        chk = [l for l in GEN_BILL.splitlines() if f'class="{cls}"' in l]
+        assert chk, f'{cls} checkbox not found'
+        assert not any('checked' in l for l in chk), chk
 
 
 def test_number_is_required_before_the_document_opens():

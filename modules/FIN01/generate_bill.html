@@ -310,7 +310,7 @@ function renderVessels(vessels) {
             onclick="event.stopPropagation();openProforma(${vi},'${ct}',${cid},${v.vcn_id})">🖨 Pro Forma Invoice</button>`;
         const rows = v.lines.map((l, li) => actual ? `
               <tr>
-                <td><input type="checkbox" class="bl-chk" data-vi="${vi}" data-li="${li}" ${l.rate>0?'checked':''} onchange="recalcSel()"></td>
+                <td><input type="checkbox" class="bl-chk" data-vi="${vi}" data-li="${li}" onchange="recalcSel()"></td>
                 <td>${l.parcel_no||''}</td><td>${l.cargo_name||''}</td>
                 <td>${l.service_name} <small>(${l.service_code})</small></td>
                 <td style="text-align:right">${(+l.declared_qty || 0).toFixed(3)}</td>
