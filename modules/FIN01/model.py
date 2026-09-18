@@ -950,7 +950,7 @@ def get_customer_billables(customer_type, customer_id):
         )
         SELECT 'VCN_IMPORT' AS src, c.id, c.parcel_no, c.cargo_name, c.quantity,
                c.equipment_names, c.toll_applicable,
-               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name,
+               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name, h.via_number,
                ll.ldud_id, ll.doc_status AS ldud_status
         FROM vcn_consigners c
         JOIN vcn_header h ON h.id = c.vcn_id
@@ -961,7 +961,7 @@ def get_customer_billables(customer_type, customer_id):
         UNION ALL
         SELECT 'VCN_EXPORT' AS src, e.id, e.parcel_no, e.cargo_name, e.quantity,
                e.equipment_names, e.toll_applicable,
-               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name,
+               h.id AS vcn_id, h.vcn_doc_num, h.vessel_name, h.via_number,
                ll.ldud_id, ll.doc_status AS ldud_status
         FROM vcn_export_cargo_declaration e
         JOIN vcn_header h ON h.id = e.vcn_id
@@ -1019,7 +1019,8 @@ def get_customer_billables(customer_type, customer_id):
 
         v = vessels.setdefault(p['vcn_id'], {
             'vcn_id': p['vcn_id'], 'vcn_doc_num': p['vcn_doc_num'],
-            'vessel_name': p['vessel_name'], 'ldud_status': p['ldud_status'],
+            'vessel_name': p['vessel_name'], 'via_number': p['via_number'] or '',
+            'ldud_status': p['ldud_status'],
             'stage': stage,
             'lines': [], 'total_amount': 0.0,
         })
@@ -1180,10 +1181,12 @@ def get_unbilled_services(customer_type, customer_id):
                st.id AS service_type_id, st.service_code, st.service_name,
                st.sac_code, st.gl_code, st.uom, st.gst_rate_id,
                st.is_tds, st.tds_percent, st.is_tcs, st.tcs_percent,
-               g.cgst_rate, g.sgst_rate, g.igst_rate
+               g.cgst_rate, g.sgst_rate, g.igst_rate,
+               h.via_number
         FROM service_records sr
         JOIN finance_service_types st ON st.id = sr.service_type_id
         LEFT JOIN gst_rates g ON g.id = st.gst_rate_id
+        LEFT JOIN vcn_header h ON sr.ref_source_type = 'VCN' AND h.id = sr.ref_source_id
         WHERE sr.source_type = %s AND sr.source_id = %s
           AND sr.doc_status = 'Approved' AND sr.is_billed = 0
         ORDER BY sr.id
@@ -1202,6 +1205,7 @@ def get_unbilled_services(customer_type, customer_id):
         out.append({
             'service_record_id': r['id'], 'record_number': r['record_number'],
             'record_date': r['record_date'], 'ref_source_display': r['ref_source_display'] or '',
+            'via_number': r['via_number'] or '',
             'service_type_id': r['service_type_id'], 'service_code': r['service_code'],
             'service_name': r['service_name'], 'qty': qty,
             'uom': r['billable_uom'] or r['uom'] or '', 'rate': rate,

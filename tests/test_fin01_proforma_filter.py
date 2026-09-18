@@ -36,12 +36,17 @@ def test_view_uses_same_key():
 
 def test_every_proforma_entrypoint_applies_the_filter():
     """A route that skipped the ?l= filter would mail the customer lines the
-    user never ticked — check each one passes it to the shared builder."""
+    user never ticked — every one goes through the single resolver, which is
+    the only place the filter is read."""
     for fn in ('def proforma_invoice(', 'def proforma_invoice_pdf(', 'def send_proforma('):
         body = SRC[SRC.index(fn):]
         body = body[:body.index('\n@bp.route') if '\n@bp.route' in body else len(body)]
-        assert "_proforma_ctx(" in body, fn
-        assert "request.args.get('l')" in body, fn
+        assert "_ctx_for_request(" in body, fn
+
+    resolver = SRC[SRC.index('def _ctx_for_request('):]
+    resolver = resolver[:resolver.index('\ndef ')]
+    assert "a.get('l')" in resolver        # section A: ticked cargo lines
+    assert "a.get('r')" in resolver        # section B: ticked service records
 
 
 if __name__ == '__main__':

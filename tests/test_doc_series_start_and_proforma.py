@@ -84,14 +84,16 @@ def test_table_name_is_not_free_text():
 def test_ref_is_the_prefix_with_the_number_appended():
     """No separator and no year are inserted — the series prefix owns the whole
     shape of the reference, so finance can change it without a code change."""
-    vessel = {'vcn_doc_num': 'VCN-1'}
-    assert fin_views._proforma_ref(vessel, 'JJLTPL/PI-26-27-', '0484') == 'JJLTPL/PI-26-27-0484'
-    assert fin_views._proforma_ref(vessel, 'JJLTPL/PI/', '0484') == 'JJLTPL/PI/0484'
+    # The fallback is whatever identifies the document — the VCN doc number for
+    # a cargo pro-forma, the record number for a services one.
+    fb = 'VCN-1'
+    assert fin_views._proforma_ref(fb, 'JJLTPL/PI-26-27-', '0484') == 'JJLTPL/PI-26-27-0484'
+    assert fin_views._proforma_ref(fb, 'JJLTPL/PI/', '0484') == 'JJLTPL/PI/0484'
     # Surrounding whitespace on the stored prefix must not reach the document.
-    assert fin_views._proforma_ref(vessel, '  ZZPF/  ', ' 7 ') == 'ZZPF/7'
-    # An old link with no series/number keeps the VCN-derived reference.
-    assert fin_views._proforma_ref(vessel, None, None) == 'JJLTPL/PI/VCN-1'
-    assert fin_views._proforma_ref(vessel, 'ZZPF-', None) == 'ZZPF-VCN-1'
+    assert fin_views._proforma_ref(fb, '  ZZPF/  ', ' 7 ') == 'ZZPF/7'
+    # An old link with no series/number keeps the fallback-derived reference.
+    assert fin_views._proforma_ref(fb, None, None) == 'JJLTPL/PI/VCN-1'
+    assert fin_views._proforma_ref(fb, 'ZZPF-', None) == 'ZZPF-VCN-1'
 
 
 def test_nothing_adds_a_financial_year():

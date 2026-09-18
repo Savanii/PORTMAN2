@@ -201,6 +201,9 @@
     <input id="pfNumber" type="text" oninput="updatePfPreview()"
            onkeydown="if(event.key==='Enter')confirmProforma();"
            placeholder="e.g. 0484" style="width:100%;padding:6px;font-size:12px;margin-bottom:10px;">
+    <label style="display:block;font-size:11px;font-weight:600;color:#4a5568;margin-bottom:3px;">Remark</label>
+    <textarea id="pfRemark" rows="2" placeholder="Prints under the heading"
+              style="width:100%;padding:6px;font-size:12px;margin-bottom:10px;box-sizing:border-box;"></textarea>
     <div style="font-size:11px;color:#718096;">Will print as</div>
     <code id="pfPreview" style="display:block;font-size:13px;padding:6px 8px;background:#f7fafc;border:1px solid #e2e8f0;border-radius:4px;margin:3px 0 14px;"></code>
     <div style="display:flex;gap:6px;justify-content:flex-end;">
@@ -375,6 +378,8 @@ function renderServices(services) {
         root.innerHTML = '<div class="empty-state">No unbilled service records for this customer.</div>';
         return;
     }
+    const ct  = document.getElementById('customerType').value;
+    const cid = document.getElementById('customerId').value;
     const rows = services.map((s, si) => `
           <tr>
             <td><input type="checkbox" class="sv-chk" data-si="${si}" onchange="recalcSel()"></td>
@@ -387,6 +392,10 @@ function renderServices(services) {
             <td style="text-align:right" id="sv-amt-${si}">₹${(s.amount||0).toFixed(2)}</td>
           </tr>`).join('');
     root.innerHTML = `
+        <div style="margin-bottom:6px;">
+          <button class="btn btn-primary" style="font-size:10px;padding:3px 10px;"
+                  onclick="openServiceProforma('${ct}',${cid})">\u{1F5A8} Pro Forma Invoice</button>
+        </div>
         <table class="data-table">
           <thead><tr><th></th><th>Record #</th><th>Date</th><th>Service</th><th>VCN Ref</th>
                      <th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
@@ -395,26 +404,49 @@ function renderServices(services) {
     recalcSel();
 }
 
+// Section A: the ticked cargo lines of one vessel.
 async function openProforma(vi, ct, cid, vcnId) {
-    const lines = ((window._vessels || [])[vi] || {}).lines || [];
+    const v = (window._vessels || [])[vi] || {};
+    const lines = v.lines || [];
     const keys = [];
     document.querySelectorAll(`.bl-chk[data-vi="${vi}"]:checked, .pf-chk[data-vi="${vi}"]:checked`).forEach(chk => {
         const l = lines[+chk.dataset.li];
         if (l) keys.push(`${l.cargo_source_type}:${l.cargo_source_id}:${l.service_type_id}`);
     });
     if (!keys.length) { alert('Tick at least one line for the pro forma invoice.'); return; }
+    await showPfDialog({ct, cid, vcnId, query: 'l=' + encodeURIComponent(keys.join(','))},
+                       keys.length, v.via_number);
+}
 
+// Section B: the ticked service records. Same dialog, same document.
+async function openServiceProforma(ct, cid) {
+    const services = window._services || [];
+    const ids = [], vias = [];
+    document.querySelectorAll('.sv-chk:checked').forEach(chk => {
+        const s = services[+chk.dataset.si];
+        if (!s) return;
+        ids.push(s.service_record_id);
+        if (s.via_number) vias.push(s.via_number);
+    });
+    if (!ids.length) { alert('Tick at least one service record for the pro forma invoice.'); return; }
+    await showPfDialog({ct, cid, vcnId: 0, query: 'r=' + encodeURIComponent(ids.join(','))},
+                       ids.length, [...new Set(vias)].join(', '));
+}
+
+async function showPfDialog(pending, count, viaNumber) {
     if (!pfSeries) {
         const resp = await fetch('/api/module/FIN01/proforma-series');
         pfSeries = await resp.json();
     }
-    pfPending = {ct, cid, vcnId, keys};
+    pfPending = pending;
 
     document.getElementById('pfSeries').innerHTML = (pfSeries.data || []).map(sr =>
         `<option value="${sr.prefix}" ${sr.is_default ? 'selected' : ''}>${sr.name} (${sr.prefix})</option>`).join('');
     document.getElementById('pfNumber').value = '';
+    // Pre-filled, not forced — the operator can clear or rewrite it.
+    document.getElementById('pfRemark').value = viaNumber ? `VIA No: ${viaNumber}` : '';
     document.getElementById('pfLineCount').textContent =
-        `${keys.length} line${keys.length === 1 ? '' : 's'} selected`;
+        `${count} line${count === 1 ? '' : 's'} selected`;
     updatePfPreview();
     document.getElementById('pfModal').style.display = 'flex';
     document.getElementById('pfNumber').focus();
@@ -436,10 +468,11 @@ function confirmProforma() {
     if (!pfPending) return;
     const number = document.getElementById('pfNumber').value.trim();
     if (!number) { alert('Enter the pro forma invoice number.'); return; }
-    const {ct, cid, vcnId, keys} = pfPending;
-    const qs = `l=${encodeURIComponent(keys.join(','))}`
+    const {ct, cid, vcnId, query} = pfPending;
+    const qs = query
              + `&s=${encodeURIComponent(document.getElementById('pfSeries').value)}`
-             + `&n=${encodeURIComponent(number)}`;
+             + `&n=${encodeURIComponent(number)}`
+             + `&rm=${encodeURIComponent(document.getElementById('pfRemark').value.trim())}`;
     closePfModal();
     window.open(`/module/FIN01/proforma/${ct}/${cid}/${vcnId}?${qs}`, '_blank');
 }

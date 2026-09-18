@@ -446,7 +446,7 @@ def proforma_series(cur=None):
     return rows
 
 
-def _proforma_ref(vessel, series, number):
+def _proforma_ref(fallback, series, number):
     """The reference printed on the pro-forma: the prefix with the number
     appended to it, exactly as typed.
 
@@ -455,9 +455,9 @@ def _proforma_ref(vessel, series, number):
     needs ('JJLTPL/PI-26-27-'), so finance shapes the whole reference from that
     one field instead of working around a format baked in here. A link with no
     number — a bookmark from before this screen asked for one — falls back to
-    the VCN doc number rather than inventing one."""
+    whatever identifies the document rather than inventing one."""
     prefix = (series or '').strip() or _PI_SERIES_PREFIX
-    tail = (number or '').strip() or vessel['vcn_doc_num']
+    tail = (number or '').strip() or (fallback or '')
     return f'{prefix}{tail}'
 
 
@@ -498,27 +498,15 @@ def _parcel_consignees(cur, lines):
     return names
 
 
-def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, number=None):
-    """Build the pro-forma document context, or (None, error, status).
+def _proforma_doc(customer_type, customer_id, lines, header_name, ref_fallback,
+                  series, number, remark):
+    """Everything the cargo and the services pro-forma have in common.
 
-    Shared by the preview, the PDF and the mail send so all three are the same
-    document — the customer can never receive figures the screen did not show.
+    Both are the same document with different lines in it, so the customer
+    master, the clubbing, the tax, the totals and the notes are built once
+    here — a figure can never differ between section A's pro-forma and
+    section B's.
     """
-    billables = model.get_customer_billables(customer_type, customer_id)
-    vessel = next((v for v in (billables.get('vessels') or []) if v['vcn_id'] == vcn_id), None)
-    if not vessel or not vessel['lines']:
-        return None, 'No billable lines found for this vessel/customer.', 404
-
-    # ?l=SRC:cargo_id:service_type_id,... — print only the lines ticked on the
-    # billables screen. Absent (a bookmarked/older link) means every line.
-    if picked:
-        want = set(picked.split(','))
-        vessel = {**vessel, 'lines': [
-            l for l in vessel['lines']
-            if f"{l['cargo_source_type']}:{l['cargo_source_id']}:{l['service_type_id']}" in want]}
-        if not vessel['lines']:
-            return None, 'No lines selected for this vessel/customer.', 404
-
     conn = get_db()
     cur = get_cursor(conn)
     tbl = 'vessel_customers' if customer_type == 'Customer' else 'vessel_agents'
@@ -526,31 +514,29 @@ def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, numbe
                            contact_email, contact_person
                     FROM {tbl} WHERE id=%s""", [customer_id])
     cust = dict(cur.fetchone() or {})
-    ac_names = _parcel_consignees(cur, vessel['lines'])
+    # Service lines carry no parcel, so this comes back empty for section B.
+    ac_names = _parcel_consignees(cur, lines)
     conn.close()
 
     # Club the per-parcel lines by service type before they reach the document.
-    rows = proforma_pdf.group_lines(vessel['lines'])
+    rows = proforma_pdf.group_lines(lines)
     subtotal = round(sum(r['amount'] for r in rows if r['amount'] is not None), 2)
-    sac_codes = sorted({l['sac_code'] for l in vessel['lines'] if l.get('sac_code')})
+    sac_codes = sorted({l['sac_code'] for l in lines if l.get('sac_code')})
 
     config = get_module_config('FIN01')
     tax_rows = proforma_pdf.tax_lines(rows, _is_intra_state(cust, config))
     total = round(subtotal + sum(t['amount'] for t in tax_rows), 2)
 
-    now = datetime.now()
     # ponytail: the number is typed in and nothing is reserved, so two users can
     # print the same one. Add a pro forma register if finance needs them unique.
-    ref_no = _proforma_ref(vessel, series, number)
-
     return {
-        'vessel': vessel,
-        'vessel_name': vessel.get('vessel_name') or vessel['vcn_doc_num'],
+        'vessel_name': header_name,
         'customer': cust,
         'ac_names': ac_names,
         'rows': rows,
-        'ref_no': ref_no,
-        'date_str': now.strftime('%d.%m.%Y'),
+        'remark': (remark or '').strip(),
+        'ref_no': _proforma_ref(ref_fallback, series, number),
+        'date_str': datetime.now().strftime('%d.%m.%Y'),
         'sac_codes': ', '.join(sac_codes),
         'subtotal': subtotal,
         'tax_rows': tax_rows,
@@ -560,13 +546,79 @@ def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, numbe
         # only when the document actually carries a cargo handling line.
         'escalation_note': (
             (config.get('escalation_note') or proforma_pdf.ESCALATION_NOTE)
-            if any(l['service_code'] in ('CHGU01', 'CHGL01') for l in vessel['lines'])
+            if any(l.get('service_code') in ('CHGU01', 'CHGL01') for l in lines)
             else ''),
         'signature_note': config.get('signature_note') or proforma_pdf.SIGNATURE_NOTE,
         'seller_gstin': config.get('seller_gstin') or _PI_GSTIN,
         'seller_pan': config.get('seller_pan') or _PI_PAN,
         'payment_note': config.get('payment_note') or _PI_PAYMENT_NOTE,
-    }, None, None
+    }
+
+
+def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None,
+                  number=None, remark=None):
+    """Section A: the cargo pro-forma for one vessel, or (None, error, status)
+    when there is nothing to print."""
+    billables = model.get_customer_billables(customer_type, customer_id)
+    vessel = next((v for v in (billables.get('vessels') or []) if v['vcn_id'] == vcn_id), None)
+    if not vessel or not vessel['lines']:
+        return None, 'No billable lines found for this vessel/customer.', 404
+
+    # ?l=SRC:cargo_id:service_type_id,... — print only the lines ticked on the
+    # billables screen. Absent (a bookmarked/older link) means every line.
+    lines = vessel['lines']
+    if picked:
+        want = set(picked.split(','))
+        lines = [l for l in lines
+                 if f"{l['cargo_source_type']}:{l['cargo_source_id']}:{l['service_type_id']}" in want]
+        if not lines:
+            return None, 'No lines selected for this vessel/customer.', 404
+
+    ctx = _proforma_doc(customer_type, customer_id, lines,
+                        vessel.get('vessel_name') or vessel['vcn_doc_num'],
+                        vessel['vcn_doc_num'], series, number, remark)
+    ctx['vessel'] = {**vessel, 'lines': lines}
+    return ctx, None, None
+
+
+def _services_ctx(customer_type, customer_id, picked, series=None, number=None,
+                  remark=None):
+    """Section B: the pro-forma for ticked service records (SRV01/SRV02).
+
+    The same document as section A — the records simply take the place of
+    parcels. A service has no cargo, so the record's VCN reference stands in as
+    the line description; that is what tells the customer which call it is for.
+    """
+    services = model.get_unbilled_services(customer_type, customer_id)
+    want = {int(x) for x in str(picked or '').split(',') if x.strip().isdigit()}
+    lines = [s for s in services if s['service_record_id'] in want] if want else services
+    if not lines:
+        return None, 'No service records selected for this customer.', 404
+
+    lines = [dict(l, cargo_name=(l.get('ref_source_display') or l.get('record_number') or ''))
+             for l in lines]
+    refs = {l.get('ref_source_display') for l in lines if l.get('ref_source_display')}
+    header = refs.pop().split('/')[0].strip() if len(refs) == 1 else 'Other Services'
+    ctx = _proforma_doc(customer_type, customer_id, lines, header,
+                        lines[0].get('record_number') or '', series, number, remark)
+    ctx['vessel'] = {'lines': lines}
+    return ctx, None, None
+
+
+def _ctx_for_request(customer_type, customer_id, vcn_id):
+    """Pick the document this request is for and build it.
+
+    `?r=` (section B record ids) means the services pro-forma, and vcn_id is
+    then unused — the screen passes 0. Otherwise it is section A's cargo
+    pro-forma for that vessel. One resolver, so the preview, the PDF and the
+    mail send cannot disagree about which document they are producing.
+    """
+    a = request.args
+    if a.get('r'):
+        return _services_ctx(customer_type, customer_id, a.get('r'),
+                             a.get('s'), a.get('n'), a.get('rm'))
+    return _proforma_ctx(customer_type, customer_id, vcn_id, a.get('l'),
+                         a.get('s'), a.get('n'), a.get('rm'))
 
 
 def _is_intra_state(cust, config):
@@ -594,7 +646,7 @@ def _proforma_filename(ctx):
 def _proforma_qs():
     """Carry the ticked lines and the chosen series/number through to the PDF
     and send endpoints, so all three render the same document."""
-    parts = [(k, request.args.get(k)) for k in ('l', 's', 'n')]
+    parts = [(k, request.args.get(k)) for k in ('l', 'r', 's', 'n', 'rm')]
     parts = [f'{k}={quote(v)}' for k, v in parts if v]
     return ('?' + '&'.join(parts)) if parts else ''
 
@@ -619,9 +671,7 @@ def proforma_invoice(customer_type, customer_id, vcn_id):
     if 'user_id' not in session:
         return redirect(url_for('login'))
 
-    ctx, err, status = _proforma_ctx(customer_type, customer_id, vcn_id,
-                                     request.args.get('l'),
-                                     request.args.get('s'), request.args.get('n'))
+    ctx, err, status = _ctx_for_request(customer_type, customer_id, vcn_id)
     if err:
         return err, status
 
@@ -645,9 +695,7 @@ def proforma_invoice_pdf(customer_type, customer_id, vcn_id):
     if 'user_id' not in session:
         return redirect(url_for('login'))
 
-    ctx, err, status = _proforma_ctx(customer_type, customer_id, vcn_id,
-                                     request.args.get('l'),
-                                     request.args.get('s'), request.args.get('n'))
+    ctx, err, status = _ctx_for_request(customer_type, customer_id, vcn_id)
     if err:
         return err, status
 
@@ -671,9 +719,7 @@ def send_proforma(customer_type, customer_id, vcn_id):
     if not (perms.get('can_add') or perms.get('can_edit') or session.get('is_admin')):
         return jsonify({'success': False, 'error': 'No permission to send invoices'}), 403
 
-    ctx, err, status = _proforma_ctx(customer_type, customer_id, vcn_id,
-                                     request.args.get('l'),
-                                     request.args.get('s'), request.args.get('n'))
+    ctx, err, status = _ctx_for_request(customer_type, customer_id, vcn_id)
     if err:
         return jsonify({'success': False, 'error': err}), status
 

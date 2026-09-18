@@ -247,6 +247,10 @@ def render(ctx):
             h=5, font=('helvetica', 'B', 9))
 
     pdf.body_row(ctx.get('vessel_name') or '', '', '', '', bold=True, underline=True)
+    # Operator's remark (VIA No by default) sits directly under that heading,
+    # so the customer reads what this document is for before the figures.
+    if ctx.get('remark'):
+        pdf.body_row(ctx['remark'], '', '', '')
     for r in ctx['rows']:
         pdf.body_row(
             r['label'],
