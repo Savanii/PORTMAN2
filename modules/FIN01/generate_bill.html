@@ -145,8 +145,16 @@
 
     <!-- Vessel-grouped billable charges -->
     <div class="form-section">
-        <h3>Billable Charges by Vessel</h3>
+        <h3>A. Billable Charges by Vessel</h3>
         <div id="billablesRoot">
+            <div class="empty-state">Select customer and click Load Billables</div>
+        </div>
+    </div>
+
+    <!-- Other services: approved, unbilled SRV01/SRV02 records for this party -->
+    <div class="form-section">
+        <h3>B. Other Services <span id="servicesBadge" style="font-size:10px;background:#3498db;color:white;padding:1px 7px;border-radius:10px;font-weight:normal;"></span></h3>
+        <div id="servicesRoot">
             <div class="empty-state">Select customer and click Load Billables</div>
         </div>
     </div>
@@ -236,6 +244,7 @@ async function loadCustomers() {
         const bits = [];
         if (c.actual_count)   bits.push(`${c.actual_count} actual`);
         if (c.proforma_count) bits.push(`${c.proforma_count} pro forma`);
+        if (c.service_count)  bits.push(`${c.service_count} service`);
         const label = bits.length ? `${c.name} (${bits.join(' · ')})` : c.name;
         sel.innerHTML += `<option value="${c.id}" data-name="${c.name}" data-gstin="${c.gstin || ''}" data-state-code="${c.gst_state_code || ''}">${label}</option>`;
     });
@@ -285,6 +294,7 @@ async function loadBillables() {
         billableData = await resp.json();
 
         renderVessels(billableData.vessels || []);
+        renderServices(billableData.services || []);
 
         document.getElementById('billablesArea').style.display = 'block';
         document.getElementById('totalBar').style.display = 'flex';
@@ -352,6 +362,38 @@ function renderVessels(vessels) {
 // ── Pro forma: pick the series and type the number before printing ─────────
 let pfSeries = null;          // {data: [{name, prefix, is_default}, ...]}
 let pfPending = null;         // the vessel/lines the dialog is about to print
+
+// Section B: approved, unbilled SRV01/SRV02 records. Same shape as a cargo
+// line once ticked, so recalcSel and generateBill treat both the same way.
+function renderServices(services) {
+    const root  = document.getElementById('servicesRoot');
+    const badge = document.getElementById('servicesBadge');
+    badge.textContent = services.length || '';
+    window._services = services;
+
+    if (!services.length) {
+        root.innerHTML = '<div class="empty-state">No unbilled service records for this customer.</div>';
+        return;
+    }
+    const rows = services.map((s, si) => `
+          <tr>
+            <td><input type="checkbox" class="sv-chk" data-si="${si}" onchange="recalcSel()"></td>
+            <td>${s.record_number || ''}</td>
+            <td>${formatDateDMY(s.record_date || '')}</td>
+            <td>${s.service_name} <small>(${s.service_code})</small></td>
+            <td style="font-size:10px;color:#718096;">${s.ref_source_display || '—'}</td>
+            <td style="text-align:right"><input type="number" class="sv-qty" data-si="${si}" value="${s.qty}" step="0.001" style="width:80px" onchange="recalcSel()"> ${s.uom}</td>
+            <td style="text-align:right"><input type="number" class="sv-rate" data-si="${si}" value="${s.rate||''}" step="0.01" placeholder="0.00" style="width:80px" onchange="recalcSel()">${s.rate>0?'':' <span style="color:#dc2626;font-size:10px">enter rate</span>'}</td>
+            <td style="text-align:right" id="sv-amt-${si}">₹${(s.amount||0).toFixed(2)}</td>
+          </tr>`).join('');
+    root.innerHTML = `
+        <table class="data-table">
+          <thead><tr><th></th><th>Record #</th><th>Date</th><th>Service</th><th>VCN Ref</th>
+                     <th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    recalcSel();
+}
 
 async function openProforma(vi, ct, cid, vcnId) {
     const lines = ((window._vessels || [])[vi] || {}).lines || [];
@@ -454,6 +496,28 @@ function recalcSel() {
         }
     });
 
+    document.querySelectorAll('.sv-chk').forEach(chk => {
+        const si = chk.dataset.si;
+        const qty = parseFloat(document.querySelector(`.sv-qty[data-si="${si}"]`).value)||0;
+        const rate = parseFloat(document.querySelector(`.sv-rate[data-si="${si}"]`).value)||0;
+        const amt = Math.round(qty*rate*100)/100;
+        document.getElementById(`sv-amt-${si}`).textContent = '₹'+amt.toFixed(2);
+        if (!chk.checked) return;
+        sel += amt;
+
+        const s = (window._services || [])[+si] || {};
+        if (s.igst_rate === null || s.igst_rate === undefined) {
+            missing.add(s.service_code || 'service');
+            return;
+        }
+        if (intra) {
+            cgst += Math.round(amt * (s.cgst_rate || 0)) / 100;
+            sgst += Math.round(amt * (s.sgst_rate || 0)) / 100;
+        } else {
+            igst += Math.round(amt * (s.igst_rate || 0)) / 100;
+        }
+    });
+
     const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = '₹'+v.toFixed(2); };
     set('selectedTotal', sel); set('selectedCgst', cgst);
     set('selectedSgst', sgst); set('selectedIgst', igst);
@@ -486,8 +550,33 @@ function generateBill() {
             tds_applicable: l.is_tds, tds_percent: l.tds_percent,
         });
     });
+    const services = window._services || [];
+    document.querySelectorAll('.sv-chk:checked').forEach(chk => {
+        const si = +chk.dataset.si;
+        const s = services[si];
+        if (!s) return;
+        picked.push({
+            service_record_id: s.service_record_id,
+            service_type_id: s.service_type_id, service_code: s.service_code,
+            service_name: s.service_name, cargo_name: '',
+            quantity: parseFloat(document.querySelector(`.sv-qty[data-si="${si}"]`).value) || 0,
+            rate: parseFloat(document.querySelector(`.sv-rate[data-si="${si}"]`).value) || 0,
+            uom: s.uom, gst_rate_id: s.gst_rate_id,
+            sac_code: s.sac_code, gl_code: s.gl_code,
+            tds_applicable: s.is_tds, tds_percent: s.tds_percent,
+        });
+    });
+
     if (!picked.length) { alert('Select at least one line to bill.'); return; }
     if (picked.some(p => !(p.rate > 0))) { alert('Every selected line needs a rate greater than 0.'); return; }
+    // Kept from the original section B: a bill is either cargo or services,
+    // never both — the two carry different sources and print differently.
+    const hasCargo   = picked.some(p => !p.service_record_id);
+    const hasService = picked.some(p =>  p.service_record_id);
+    if (hasCargo && hasService) {
+        alert('Cargo charges and other services cannot go on the same bill.\nGenerate a separate bill for each.');
+        return;
+    }
 
     const ct = document.getElementById('customerType').value;
     const cidSel = document.getElementById('customerId');

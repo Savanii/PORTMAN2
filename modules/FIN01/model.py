@@ -718,9 +718,13 @@ def generate_bill(data, created_by, bill_status, approved_by=None):
     lines = data.get('lines') or []
     if not lines:
         raise ValueError('No lines to bill')
+    # A cargo line is anchored to a parcel on a vessel; a service line (section
+    # B) is anchored to an SRV01/SRV02 record and has neither.
     for l in lines:
+        if l.get('service_record_id'):
+            continue
         if not l.get('cargo_source_type') or not l.get('cargo_source_id') or not l.get('vcn_id'):
-            raise ValueError('Each bill line needs cargo_source_type, cargo_source_id and vcn_id')
+            raise ValueError('Each cargo bill line needs cargo_source_type, cargo_source_id and vcn_id')
     vcn_ids = sorted({l['vcn_id'] for l in lines if l.get('vcn_id')})
 
     conn = get_db()
@@ -749,10 +753,10 @@ def generate_bill(data, created_by, bill_status, approved_by=None):
     conn.close()
 
     for l in lines:
-        key = (l['cargo_source_type'], l['cargo_source_id'])
+        key = (l.get('cargo_source_type'), l.get('cargo_source_id'))
         cap, parcel_no = caps.get(key, (None, None))
         if cap is None:
-            continue
+            continue        # service line, or a source with no declared cap
         prior = already.get(key + (l.get('service_type_id'),), 0.0)
         if would_overbill(prior, l.get('quantity') or 0, cap):
             raise ValueError(
@@ -791,6 +795,9 @@ def generate_bill(data, created_by, bill_status, approved_by=None):
             'sac_code': l.get('sac_code'), 'gl_code': l.get('gl_code'),
             'tds_applicable': l.get('tds_applicable'), 'tds_percent': l.get('tds_percent'),
             'cargo_source_type': l.get('cargo_source_type'), 'cargo_source_id': l.get('cargo_source_id'),
+            # save_bill_line flips the record to billed when this is set, which
+            # is what keeps it out of section B next time.
+            'service_record_id': l.get('service_record_id'),
             'customer_gstin': data.get('customer_gstin'),
             'customer_state_code': data.get('customer_gst_state_code'),
         }
@@ -809,6 +816,8 @@ def generate_bill(data, created_by, bill_status, approved_by=None):
     for vid in vcn_ids:
         cur.execute('INSERT INTO bill_vessels (bill_id, vcn_id) VALUES (%s, %s)', [bill_id, vid])
     for l in lines:
+        if l.get('service_record_id'):
+            continue        # not a parcel charge; the record's is_billed flag covers it
         record_parcel_charge(cur, l.get('cargo_source_type'), l.get('cargo_source_id'),
                              l.get('service_type_id'), l.get('service_code'), bill_id,
                              float(l.get('quantity') or 0), created_by)
@@ -1053,7 +1062,8 @@ def get_customer_billables(customer_type, customer_id):
         v['lines'].sort(key=lambda l: _SERVICE_DISPLAY_ORDER.index(l['service_code'])
                         if l['service_code'] in _SERVICE_DISPLAY_ORDER else 99)
 
-    return {'vessels': list(vessels.values())}
+    return {'vessels': list(vessels.values()),
+            'services': get_unbilled_services(customer_type, customer_id)}
 
 
 def customers_with_billables():
@@ -1120,9 +1130,93 @@ def customers_with_billables():
         charges = len(parcel_charge_codes(p['src'], p['equipment_names'], p['toll_applicable']))
         if qty * charges - float(p['billed'] or 0) <= 1e-6:
             continue  # every applicable charge is fully billed
-        c = counts.setdefault(p['payer'], {'actual_count': 0, 'proforma_count': 0})
+        c = counts.setdefault(p['payer'], _empty_counts())
         c['actual_count' if actual else 'proforma_count'] += 1
+
+    # Other services (section B) make a customer billable just as cargo does —
+    # a party whose only outstanding work is a service record has to show up in
+    # the picker, or there is no way to reach it.
+    for name, n in unbilled_service_counts().items():
+        counts.setdefault(name, _empty_counts())['service_count'] = n
     return counts
+
+
+def _empty_counts():
+    return {'actual_count': 0, 'proforma_count': 0, 'service_count': 0}
+
+
+def unbilled_service_counts():
+    """{customer_or_agent_name: approved unbilled service records}.
+
+    Keyed by name to line up with the parcel counts, which key on the payer
+    name written on the declaration."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('''
+        SELECT COALESCE(vc.name, va.name) AS name, COUNT(*) AS n
+        FROM service_records sr
+        LEFT JOIN vessel_customers vc ON sr.source_type = 'Customer' AND vc.id = sr.source_id
+        LEFT JOIN vessel_agents    va ON sr.source_type = 'Agent'    AND va.id = sr.source_id
+        WHERE sr.doc_status = 'Approved' AND sr.is_billed = 0
+          AND COALESCE(vc.name, va.name) IS NOT NULL
+        GROUP BY 1
+    ''')
+    out = {r['name']: int(r['n']) for r in cur.fetchall()}
+    conn.close()
+    return out
+
+
+def get_unbilled_services(customer_type, customer_id):
+    """Approved, unbilled service records for one customer, priced for the
+    billing screen (section B).
+
+    Same shape as the cargo lines so the screen can total GST the same way —
+    the tax rates ride along rather than being looked up a second time."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('''
+        SELECT sr.id, sr.record_number, sr.record_date, sr.billable_quantity,
+               sr.billable_uom, sr.ref_source_display, sr.remarks,
+               st.id AS service_type_id, st.service_code, st.service_name,
+               st.sac_code, st.gl_code, st.uom, st.gst_rate_id,
+               st.is_tds, st.tds_percent, st.is_tcs, st.tcs_percent,
+               g.cgst_rate, g.sgst_rate, g.igst_rate
+        FROM service_records sr
+        JOIN finance_service_types st ON st.id = sr.service_type_id
+        LEFT JOIN gst_rates g ON g.id = st.gst_rate_id
+        WHERE sr.source_type = %s AND sr.source_id = %s
+          AND sr.doc_status = 'Approved' AND sr.is_billed = 0
+        ORDER BY sr.id
+    ''', [customer_type, customer_id])
+    rows = [dict(r) for r in cur.fetchall()]
+    # No cargo on a service record, so only the generic per-service rate applies.
+    _, rates_by_service = fcam_model.get_customer_rates_map(
+        customer_type, customer_id, cur=cur)
+    conn.close()
+
+    out = []
+    for r in rows:
+        rate_info = rates_by_service.get(r['service_type_id'])
+        rate = float(rate_info['rate']) if rate_info and rate_info.get('rate') is not None else 0.0
+        qty = _to_float(r['billable_quantity'])
+        out.append({
+            'service_record_id': r['id'], 'record_number': r['record_number'],
+            'record_date': r['record_date'], 'ref_source_display': r['ref_source_display'] or '',
+            'service_type_id': r['service_type_id'], 'service_code': r['service_code'],
+            'service_name': r['service_name'], 'qty': qty,
+            'uom': r['billable_uom'] or r['uom'] or '', 'rate': rate,
+            'amount': round(qty * rate, 2),
+            'sac_code': r['sac_code'] or '', 'gl_code': r['gl_code'],
+            'gst_rate_id': r['gst_rate_id'],
+            # None (not 0) when the service has no usable GST rate — same
+            # contract the cargo lines use, so the screen can warn identically.
+            'cgst_rate': _to_float(r['cgst_rate']) if r['cgst_rate'] is not None else None,
+            'sgst_rate': _to_float(r['sgst_rate']) if r['sgst_rate'] is not None else None,
+            'igst_rate': _to_float(r['igst_rate']) if r['igst_rate'] is not None else None,
+            'is_tds': r['is_tds'], 'tds_percent': float(r['tds_percent'] or 0),
+            'is_tcs': r['is_tcs'], 'tcs_percent': float(r['tcs_percent'] or 0),
+        })
+    return out
 
 
 def unbill_invoice_sources(cur, invoice_id):
