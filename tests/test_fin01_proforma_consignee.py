@@ -110,3 +110,41 @@ _MIN_CTX = {
 
 def test_demo_still_renders():
     assert proforma_pdf.demo().startswith(b'%PDF')
+
+
+# ── Money column ────────────────────────────────────────────────────────────
+
+def test_every_figure_in_the_money_column_carries_paise():
+    """A bare '33,557' beside a '2,49,227.50' reads as a different kind of
+    number, so the column is written to the paise throughout."""
+    assert proforma_pdf.inr(33557) == '33,557.00'
+    assert proforma_pdf.inr(33557.7) == '33,557.70'
+    assert proforma_pdf.inr(372852.25) == '3,72,852.25'
+    assert proforma_pdf.inr(0) == '0.00'
+    assert proforma_pdf.inr(None) == '0.00'
+    assert proforma_pdf.inr(-1234.5) == '-1,234.50'
+    # the covering mail quotes the same figures, so it formats them the same way
+    assert views._inr(33557) == '33,557.00'
+    assert views._inr(33557.7) == '33,557.70'
+
+
+def test_gst_is_not_rounded_to_whole_rupees():
+    """It used to be, which drifted up to a rupee per line against the amounts
+    printed beside it."""
+    rows = [{'label': 'x', 'amount': 372852.25,
+             'cgst_rate': 9, 'sgst_rate': 9, 'igst_rate': 18}]
+    tax = proforma_pdf.tax_lines(rows, intra_state=True)
+    # 9% of 3,72,852.25 = 33,556.7025, half up to the paise
+    assert [t['amount'] for t in tax] == [33556.70, 33556.70], tax
+    assert proforma_pdf.inr(tax[0]['amount']) == '33,556.70'
+    # and the total adds up from the printed figures, not from rounded ones
+    total = round(372852.25 + sum(t['amount'] for t in tax), 2)
+    assert proforma_pdf.inr(total) == '4,39,965.65'
+
+
+def test_half_up_at_the_paise():
+    rows = [{'label': 'x', 'amount': 100.05, 'cgst_rate': 5, 'sgst_rate': 0, 'igst_rate': 0}]
+    # 5% of 100.05 = 5.0025 -> 5.00
+    assert proforma_pdf.tax_lines(rows, intra_state=True)[0]['amount'] == 5.00
+    rows[0]['amount'] = 100.10        # 5% = 5.005 -> 5.01, not 5.00
+    assert proforma_pdf.tax_lines(rows, intra_state=True)[0]['amount'] == 5.01

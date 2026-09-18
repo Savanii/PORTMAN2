@@ -51,7 +51,10 @@ def _l1(text):
 
 
 def inr(n):
-    """Indian digit grouping: 305843 -> '3,05,843' (paise only when nonzero)."""
+    """Indian digit grouping, always to the paise: 305843 -> '3,05,843.00'.
+
+    Every figure in the money column is written the same way — a bare
+    '3,05,843' next to a '2,49,227.50' reads as a different kind of number."""
     n = round(float(n or 0), 2)
     neg, n = n < 0, abs(n)
     rupees, paise = int(n), int(round((n - int(n)) * 100))
@@ -65,9 +68,7 @@ def inr(n):
         if head:
             parts.insert(0, head)
         s = ','.join(parts) + ',' + tail
-    if paise:
-        s += f'.{paise:02d}'
-    return ('-' if neg else '') + s
+    return ('-' if neg else '') + s + f'.{paise:02d}'
 
 
 def qty_fmt(q):
@@ -160,10 +161,13 @@ def group_lines(lines):
 
 
 def _rupees(amount):
-    """Whole rupees, half up. The manual pro forma carries no paise on the tax
-    lines (9% of 5,17,440 = 46,569.60 prints as 46,570), and the printed column
-    has to add up for whoever checks it by hand."""
-    return int(Decimal(str(amount)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+    """Rupees and paise, half up.
+
+    The tax lines used to round to whole rupees to match the hand-typed pro
+    forma, which quietly dropped up to a rupee against the line amounts beside
+    them. They carry paise like every other figure in the column now, so the
+    printed column adds up for whoever checks it by hand."""
+    return float(Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 def tax_lines(rows, intra_state):
@@ -332,7 +336,9 @@ def demo():
     assert [r['label'] for r in merged] == ['Cargo Handling Loading', 'HEAVY MINERAL OIL']
     assert merged[1]['qty'] == 1091.662
 
-    assert inr(71148) == '71,148' and inr(305843.5) == '3,05,843.50'
+    # every figure carries paise, so a whole-rupee amount still prints .00
+    assert inr(71148) == '71,148.00' and inr(305843.5) == '3,05,843.50'
+    assert inr(0) == '0.00' and inr(-1234.5) == '-1,234.50'
 
     # --- the real document: two parcels of one vessel, clubbed by service ---
     # A long cargo name, straight off the billables screen, to exercise the fit.
@@ -364,16 +370,17 @@ def demo():
     assert subtotal == 517440.0
     tax = tax_lines(rows, intra_state=True)
     assert [t['label'] for t in tax] == ['ADD: C-GST 9%', 'ADD: S-GST 9%'], tax
-    # 9% of 5,17,440 is 46,569.60 — the document shows 46,570, and 6,10,580
-    assert [t['amount'] for t in tax] == [46570, 46570], tax
+    # 9% of 5,17,440 is 46,569.60 — printed to the paise, like every other
+    # figure in the column, so the tax no longer drifts from the line amounts
+    assert [t['amount'] for t in tax] == [46569.60, 46569.60], tax
     total = round(subtotal + sum(t['amount'] for t in tax), 2)
-    assert total == 610580.0, total
+    assert total == 610579.20, total
 
     # 0%-rated toll must not create a tax line, nor blend into the cargo rate
     mixed = tax_lines(rows + [{'label': 'Toll Charges', 'amount': 71148.0,
                                'cgst_rate': 0, 'sgst_rate': 0, 'igst_rate': 0}],
                       intra_state=True)
-    assert [t['amount'] for t in mixed] == [46570, 46570], mixed
+    assert [t['amount'] for t in mixed] == [46569.60, 46569.60], mixed
     # inter-state swaps the pair for a single IGST line at the combined rate
     assert [t['label'] for t in tax_lines(rows, intra_state=False)] == ['ADD: I-GST 18%']
 

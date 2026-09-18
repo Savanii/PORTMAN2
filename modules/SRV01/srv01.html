@@ -111,19 +111,19 @@
         </div>
     </div>
 
-    <!-- Row 3: Optional VCN reference -->
+    <!-- Row 3: VCN reference — optional in SRV01, mandatory in SRV02 -->
     <div class="ref-section">
-        <p class="section-label">Optional Reference (VCN)</p>
+        <p class="section-label">{{ 'Reference (VCN) *' if ref_required else 'Optional Reference (VCN)' }}</p>
         <div class="form-grid">
             <div class="form-group">
-                <label>Reference Type</label>
+                <label>Reference Type{{ ' *' if ref_required }}</label>
                 <select id="refSourceType" onchange="loadRefOptions()">
-                    <option value="">-- None --</option>
-                    <option value="VCN">VCN (Vessel Call)</option>
+                    {% if not ref_required %}<option value="">-- None --</option>{% endif %}
+                    <option value="VCN" {{ 'selected' if ref_required }}>VCN (Vessel Call)</option>
                 </select>
             </div>
             <div class="form-group">
-                <label>Reference Document</label>
+                <label>Reference Document{{ ' *' if ref_required }}</label>
                 <select id="refSourceId">
                     <option value="">-- Select Reference Type First --</option>
                 </select>
@@ -244,6 +244,7 @@
 {% endif %}
 
 <script>
+const REF_REQUIRED = {{ 'true' if ref_required else 'false' }};
 let serviceTypesData = [];
 let fieldDefinitions = [];
 let currentRecordId = null;
@@ -293,7 +294,9 @@ async function loadRefOptions() {
     sel.innerHTML = '<option value="">-- Loading... --</option>';
     const resp = await fetch(`/api/module/{{ mod }}/source-options/${refType}`);
     const json = await resp.json();
-    sel.innerHTML = '<option value="">-- None --</option>';
+    sel.innerHTML = REF_REQUIRED
+        ? '<option value="">-- Select VCN --</option>'
+        : '<option value="">-- None --</option>';
     (json.data || []).forEach(opt => {
         sel.innerHTML += `<option value="${opt.id}">${opt.display}</option>`;
     });
@@ -318,8 +321,9 @@ function resetForm() {
     document.getElementById('docStatus').value = 'Pending';
     document.getElementById('customerType').value = '';
     document.getElementById('customerId').innerHTML = '<option value="">-- Select Customer Type First --</option>';
-    document.getElementById('refSourceType').value = '';
+    document.getElementById('refSourceType').value = REF_REQUIRED ? 'VCN' : '';
     document.getElementById('refSourceId').innerHTML = '<option value="">-- Select Reference Type First --</option>';
+    if (REF_REQUIRED) loadRefOptions();
     document.getElementById('serviceTypeId').value = '';
     document.getElementById('remarks').value = '';
     document.getElementById('billableQty').value = '';
@@ -606,6 +610,13 @@ async function saveRecord() {
     const customerOpt = document.getElementById('customerId').selectedOptions[0];
     const refSourceType = document.getElementById('refSourceType').value || null;
     const refSourceId = document.getElementById('refSourceId').value || null;
+    // Mandatory here, unlike SRV01 — the server refuses it either way, this
+    // just says so before the round trip.
+    if (REF_REQUIRED && !refSourceId) {
+        alert('Select the VCN this record is against.');
+        document.getElementById('refSourceId').focus();
+        return;
+    }
     const refSourceOpt = document.getElementById('refSourceId').selectedOptions[0];
     const refSourceDisplay = (refSourceId && refSourceOpt) ? refSourceOpt.textContent : null;
 

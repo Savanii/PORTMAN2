@@ -11,6 +11,11 @@ MODULE_INFO = {'code': 'SRV01', 'name': 'Service Recording'}
 # for — see build_blueprint at the bottom of this file.
 MODULE_NAMES = {'SRV01': 'Service Recording', 'SRV02': 'Service Recording (SRV Series)'}
 
+# Modules where the VCN reference is mandatory rather than optional. SRV02
+# records are always against a vessel call, so a record with no VCN on it is
+# not something anyone can bill or trace back.
+REF_REQUIRED = {'SRV02'}
+
 
 def _code():
     """The service module this request was routed to: 'SRV01' or 'SRV02'."""
@@ -43,6 +48,7 @@ def index():
     return render_template('srv01.html',
                          mod=code,
                          module_name=MODULE_NAMES.get(code, code),
+                         ref_required=code in REF_REQUIRED,
                          data=data,
                          page=page,
                          last_page=(total + 19) // 20,
@@ -154,7 +160,7 @@ def save():
     # route can do directly (approver/admin, or approval_add off), not just the
     # approve endpoint. Draft and Pending stay saveable half-filled on purpose.
     if header_data['doc_status'] == 'Approved':
-        error = _approval_blocker(header_data, field_values)
+        error = _approval_blocker(header_data, field_values, code)
         if error:
             return jsonify({'success': False, 'error': error}), 400
 
@@ -162,11 +168,13 @@ def save():
     return jsonify({'success': True, 'id': record_id, 'record_number': record_number})
 
 
-def _approval_blocker(header_data, field_values):
+def _approval_blocker(header_data, field_values, code=MODULE_CODE):
     """Why this record may not be Approved, or None if it may.
 
     Shared by save (born-Approved path) and approve, so the two can never
     disagree about what a complete record is."""
+    if code in REF_REQUIRED and not header_data.get('ref_source_id'):
+        return 'A VCN reference is required for every record in this module.'
     service_type_id = header_data.get('service_type_id')
     missing = model.missing_required(service_type_id, field_values)
     if missing:
@@ -217,7 +225,7 @@ def approve():
     header, values = model.get_service_record_by_id(record_id)
     if not header:
         return jsonify({'success': False, 'error': 'Record not found'}), 404
-    error = _approval_blocker(header, values)
+    error = _approval_blocker(header, values, _code())
     if error:
         return jsonify({'success': False, 'error': error}), 400
 

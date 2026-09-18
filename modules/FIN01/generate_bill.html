@@ -311,17 +311,17 @@ function renderVessels(vessels) {
         const rows = v.lines.map((l, li) => actual ? `
               <tr>
                 <td><input type="checkbox" class="bl-chk" data-vi="${vi}" data-li="${li}" onchange="recalcSel()"></td>
-                <td>${l.parcel_no || (l.is_vessel_charge ? '—' : '')}</td><td>${l.cargo_name || (l.is_vessel_charge ? 'Whole vessel' : '')}</td>
+                <td>${l.parcel_no||''}</td><td>${l.cargo_name||''}</td>
                 <td>${l.service_name} <small>(${l.service_code})</small></td>
-                <td style="text-align:right">${l.is_vessel_charge ? '—' : (+l.declared_qty || 0).toFixed(3)}</td>
-                <td style="text-align:right"><input type="number" class="bl-qty" data-vi="${vi}" data-li="${li}" value="${l.qty}" max="${l.qty}" step="0.001" style="width:80px" ${l.is_vessel_charge ? 'readonly' : ''} onchange="clampQty(this,${l.qty});recalcSel()"> ${l.uom}
-                    ${(l.actual_qty === null && !l.is_vessel_charge) ? '<br><span style="color:#c05621;font-size:9px">no LUEU01 log — BL qty used</span>' : ''}</td>
+                <td style="text-align:right">${(+l.declared_qty || 0).toFixed(3)}</td>
+                <td style="text-align:right"><input type="number" class="bl-qty" data-vi="${vi}" data-li="${li}" value="${l.qty}" max="${l.qty}" step="0.001" style="width:80px" onchange="clampQty(this,${l.qty});recalcSel()"> ${l.uom}
+                    ${l.actual_qty === null ? '<br><span style="color:#c05621;font-size:9px">no LUEU01 log — BL qty used</span>' : ''}</td>
                 <td style="text-align:right"><input type="number" class="bl-rate" data-vi="${vi}" data-li="${li}" value="${l.rate||''}" step="0.01" placeholder="0.00" style="width:80px" onchange="recalcSel()">${l.rate>0?'':' <span style="color:#dc2626;font-size:10px">enter rate</span>'}</td>
                 <td style="text-align:right" id="amt-${vi}-${li}">₹${(l.amount||0).toFixed(2)}</td>
               </tr>` : `
               <tr>
                 <td><input type="checkbox" class="pf-chk" data-vi="${vi}" data-li="${li}"></td>
-                <td>${l.parcel_no || (l.is_vessel_charge ? '—' : '')}</td><td>${l.cargo_name || (l.is_vessel_charge ? 'Whole vessel' : '')}</td>
+                <td>${l.parcel_no||''}</td><td>${l.cargo_name||''}</td>
                 <td>${l.service_name} <small>(${l.service_code})</small></td>
                 <td style="text-align:right">${(+l.qty).toFixed(3)} ${l.uom}</td>
                 <td style="text-align:right">${l.rate>0 ? (+l.rate).toFixed(2) : '<span style="color:#dc2626;font-size:10px">no agreement rate</span>'}</td>

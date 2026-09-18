@@ -372,7 +372,10 @@ def bill_generate():
 
 
 def _inr(n):
-    """Indian digit grouping: 305843 -> '3,05,843' (paise only when nonzero)."""
+    """Indian digit grouping, always to the paise: 305843 -> '3,05,843.00'.
+
+    Matches proforma_pdf.inr — the covering mail quotes the same figures as the
+    attached PDF, so they have to be written the same way."""
     n = round(float(n or 0), 2)
     neg = n < 0
     n = abs(n)
@@ -388,7 +391,7 @@ def _inr(n):
         if head:
             parts.insert(0, head)
         s = ','.join(parts + [tail])
-    return ('-' if neg else '') + s + (f'.{p:02d}' if p else '')
+    return ('-' if neg else '') + s + f'.{p:02d}'
 
 
 def _amount_in_words(amount):
