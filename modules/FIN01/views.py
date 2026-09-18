@@ -458,6 +458,43 @@ def _proforma_ref(vessel, series, number):
     return f'{prefix}{tail}'
 
 
+# VCN01 labels this column Consignee; the table has always called it
+# consigner_name. Same column, both parcel tables.
+_CONSIGNEE_TABLES = {'VCN_IMPORT': 'vcn_consigners',
+                     'VCN_EXPORT': 'vcn_export_cargo_declaration'}
+
+
+def _parcel_consignees(cur, lines):
+    """Consignees of the parcels actually on this document, in line order and
+    without repeats.
+
+    They print under the payer as 'A/C <consignee>': the bill goes to whoever
+    the VCN names as paying, on account of whoever the cargo is consigned to.
+    One vessel can carry parcels for several consignees under one payer, so
+    this is a list, not a single name — and it follows the ticked lines, so
+    unticking a parcel drops its consignee from the document too.
+    """
+    wanted = {}
+    for l in lines:
+        src, cid = l.get('cargo_source_type'), l.get('cargo_source_id')
+        if src in _CONSIGNEE_TABLES and cid is not None:
+            wanted.setdefault(src, []).append(cid)
+
+    by_id = {}
+    for src, ids in wanted.items():
+        cur.execute(f'SELECT id, consigner_name FROM {_CONSIGNEE_TABLES[src]} WHERE id = ANY(%s)',
+                    [sorted(set(ids))])
+        for r in cur.fetchall():
+            by_id[(src, r['id'])] = (r['consigner_name'] or '').strip()
+
+    names = []
+    for l in lines:
+        name = by_id.get((l.get('cargo_source_type'), l.get('cargo_source_id')))
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, number=None):
     """Build the pro-forma document context, or (None, error, status).
 
@@ -486,6 +523,7 @@ def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, numbe
                            contact_email, contact_person
                     FROM {tbl} WHERE id=%s""", [customer_id])
     cust = dict(cur.fetchone() or {})
+    ac_names = _parcel_consignees(cur, vessel['lines'])
     conn.close()
 
     # Club the per-parcel lines by service type before they reach the document.
@@ -506,6 +544,7 @@ def _proforma_ctx(customer_type, customer_id, vcn_id, picked, series=None, numbe
         'vessel': vessel,
         'vessel_name': vessel.get('vessel_name') or vessel['vcn_doc_num'],
         'customer': cust,
+        'ac_names': ac_names,
         'rows': rows,
         'ref_no': ref_no,
         'date_str': now.strftime('%d.%m.%Y'),

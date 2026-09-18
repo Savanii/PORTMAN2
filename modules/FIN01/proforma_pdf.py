@@ -215,6 +215,9 @@ def render(ctx):
     # --- To block: variable height, so draw the text then box it ---------
     cust = ctx.get('customer') or {}
     to_lines = ['To,', cust.get('name') or '']
+    # The payer is billed on account of whoever the VCN consigns the cargo to,
+    # so each consignee on this document gets its own A/C line under the name.
+    to_lines += [f'A/C {n}' for n in (ctx.get('ac_names') or []) if n]
     for part in (cust.get('billing_address'), cust.get('city'), cust.get('pincode')):
         if part:
             to_lines.extend(str(part).splitlines())
@@ -378,11 +381,12 @@ def demo():
         'vessel_name': 'MT HAFNIA HAWK', 'ref_no': 'JJLTPL/PI/26-27/0487',
         'date_str': '24.08.2026',
         'customer': {'name': 'MOTUMAL & CO', 'billing_address':
-                     'A/C ADM AGRO INDUSTRIES KOTA & AKOLA PVT. LTD.\n'
                      '1 ST. FLOOR, 101, EMCA HOUSE,\n'
                      '289, SHAHID BHAGAT SINGH ROAD, FORT,',
                      'city': 'MUMBAI', 'pincode': '400 001.',
                      'gstin': '27AAFFM2481C1ZI'},
+        # The A/C line is the VCN consignee now, not part of the address.
+        'ac_names': ['ADM AGRO INDUSTRIES KOTA & AKOLA PVT. LTD.'],
         'rows': rows, 'sac_codes': '996719', 'subtotal': subtotal,
         'tax_rows': tax, 'total': total,
         'amount_words': 'Rupees Six Lakh Ten Thousand Five Hundred Eighty Only.',
