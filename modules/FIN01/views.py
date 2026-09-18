@@ -499,7 +499,7 @@ def _parcel_consignees(cur, lines):
 
 
 def _proforma_doc(customer_type, customer_id, lines, header_name, ref_fallback,
-                  series, number, remark):
+                  series, number, remark, flat=False):
     """Everything the cargo and the services pro-forma have in common.
 
     Both are the same document with different lines in it, so the customer
@@ -519,7 +519,10 @@ def _proforma_doc(customer_type, customer_id, lines, header_name, ref_fallback,
     conn.close()
 
     # Club the per-parcel lines by service type before they reach the document.
-    rows = proforma_pdf.group_lines(lines)
+    # `flat` clubs them the same way but puts the figures on the service row
+    # itself — for lines with no cargo, the detail row underneath would only
+    # repeat the heading.
+    rows = (proforma_pdf.flat_lines if flat else proforma_pdf.group_lines)(lines)
     subtotal = round(sum(r['amount'] for r in rows if r['amount'] is not None), 2)
     sac_codes = sorted({l['sac_code'] for l in lines if l.get('sac_code')})
 
@@ -586,8 +589,8 @@ def _services_ctx(customer_type, customer_id, picked, series=None, number=None,
     """Section B: the pro-forma for ticked service records (SRV01/SRV02).
 
     The same document as section A — the records simply take the place of
-    parcels. A service has no cargo, so the record's VCN reference stands in as
-    the line description; that is what tells the customer which call it is for.
+    parcels. A service has no cargo to break down, so each service is one flat
+    row rather than a heading with detail under it.
     """
     services = model.get_unbilled_services(customer_type, customer_id)
     want = {int(x) for x in str(picked or '').split(',') if x.strip().isdigit()}
@@ -595,12 +598,19 @@ def _services_ctx(customer_type, customer_id, picked, series=None, number=None,
     if not lines:
         return None, 'No service records selected for this customer.', 404
 
-    lines = [dict(l, cargo_name=(l.get('ref_source_display') or l.get('record_number') or ''))
-             for l in lines]
-    refs = {l.get('ref_source_display') for l in lines if l.get('ref_source_display')}
-    header = refs.pop().split('/')[0].strip() if len(refs) == 1 else 'Other Services'
+    vcns = {(l.get('ref_source_display') or '').split('/')[0].strip()
+            for l in lines if l.get('ref_source_display')}
+    one_vcn = len(vcns) == 1
+    header = next(iter(vcns)) if one_vcn else 'Other Services'
+    # The VCN is already the heading when there is only one, so repeating it on
+    # every line says nothing. It stays on the line only when the document
+    # spans several calls, where it is the only thing telling them apart.
+    if not one_vcn:
+        lines = [dict(l, cargo_name=(l.get('ref_source_display') or '')) for l in lines]
+
     ctx = _proforma_doc(customer_type, customer_id, lines, header,
-                        lines[0].get('record_number') or '', series, number, remark)
+                        lines[0].get('record_number') or '', series, number, remark,
+                        flat=one_vcn)
     ctx['vessel'] = {'lines': lines}
     return ctx, None, None
 
@@ -1144,6 +1154,8 @@ def get_customers_for_billing(customer_type):
     if request.args.get('with_billables') == '1':
         counts = model.customers_with_billables()
         rows = [dict(r, **counts[r['name']]) for r in rows if counts.get(r['name'])]
-        rows.sort(key=lambda r: (-r['actual_count'], r['name'] or ''))
+        # Alphabetical: the operator knows which party they are billing and
+        # scans for the name, rather than hunting for it by how much it owes.
+        rows.sort(key=lambda r: (r['name'] or '').upper())
 
     return jsonify({'data': rows})

@@ -157,3 +157,14 @@ def test_the_screen_has_section_b():
 
 def test_cargo_and_services_are_not_mixed_on_one_bill():
     assert 'cannot go on the same bill' in GEN_BILL
+
+
+def test_the_customer_picker_is_sorted_by_name():
+    """Alphabetical — the operator knows which party they are billing and scans
+    for the name, rather than hunting for it by how much it owes."""
+    src = Path('modules/FIN01/views.py').read_text(encoding='utf-8')
+    body = src[src.index('def get_customers_for_billing('):]
+    body = body[:body.index('\ndef ')] if '\ndef ' in body else body
+    assert "rows.sort(key=lambda r: (r['name'] or '').upper())" in body
+    # the billable counts no longer drive the order, only the label
+    assert 'actual_count' not in body.split('rows.sort')[1]

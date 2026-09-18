@@ -96,19 +96,73 @@ def test_only_the_ticked_records_print():
         _teardown(cid, vcn, rec, ag)
 
 
-def test_a_service_line_is_described_by_its_vcn_reference():
-    """There is no cargo on a service record, so the VCN reference is what
-    tells the customer which call the charge belongs to."""
+def test_one_vcn_is_named_once_in_the_heading_not_on_every_line():
+    """A service has no cargo to break down, so it is one flat row carrying its
+    own figures — repeating the VCN under a heading that already says it adds
+    nothing."""
     conn = get_db(); cur = get_cursor(conn)
     cid, vcn, rec, ag = _setup(cur)
     conn.commit(); conn.close()
     try:
         ctx, _, _ = views._services_ctx('Customer', cid, str(rec))
-        labels = [r['label'] for r in ctx['rows']]
-        assert any('VCN-PF-1' in l for l in labels), labels
         assert ctx['vessel_name'] == 'VCN-PF-1'
+        assert len(ctx['rows']) == 1
+        row = ctx['rows'][0]
+        assert 'VCN-PF-1' not in row['label'], row['label']
+        assert row['indent'] is False
+        # the figures are on the row itself, not on a detail row underneath
+        assert row['qty'] == 2.0 and row['rate'] == RATE and row['amount'] == 2400.0
     finally:
         _teardown(cid, vcn, rec, ag)
+
+
+def test_several_vcns_keep_their_reference_on_the_line():
+    """With more than one call on the document the heading cannot name them,
+    so the reference is the only thing telling the lines apart."""
+    conn = get_db(); cur = get_cursor(conn)
+    cid, vcn, rec, ag = _setup(cur)
+    cur.execute("""INSERT INTO vcn_header (operation_type, vcn_doc_num, vessel_name, via_number)
+                   VALUES ('Import','VCN-PF-2','PFVESSEL2','ZZVIA8') RETURNING id""")
+    vcn2 = cur.fetchone()['id']
+    cur.execute('SELECT service_type_id FROM service_records WHERE id=%s', [rec])
+    svc = cur.fetchone()['service_type_id']
+    cur.execute("""INSERT INTO service_records
+        (module_code, record_number, service_type_id, source_type, source_id, source_display,
+         ref_source_type, ref_source_id, ref_source_display,
+         record_date, billable_quantity, billable_uom, doc_status, is_billed)
+        VALUES ('SRV02','ZZPFS2',%s,'Customer',%s,%s,'VCN',%s,'VCN-PF-2 / PFVESSEL2',
+                '2026-09-18',1,'OTH','Approved',0) RETURNING id""", [svc, cid, NAME, vcn2])
+    rec2 = cur.fetchone()['id']
+    conn.commit(); conn.close()
+    try:
+        ctx, _, _ = views._services_ctx('Customer', cid, f'{rec},{rec2}')
+        assert ctx['vessel_name'] == 'Other Services'
+        labels = ' '.join(r['label'] for r in ctx['rows'])
+        assert 'VCN-PF-1' in labels and 'VCN-PF-2' in labels, labels
+    finally:
+        conn = get_db(); cur = get_cursor(conn)
+        cur.execute('DELETE FROM service_records WHERE id=%s', [rec2])
+        cur.execute('DELETE FROM vcn_header WHERE id=%s', [vcn2])
+        conn.commit(); conn.close()
+        _teardown(cid, vcn, rec, ag)
+
+
+def test_flat_lines_club_by_service_and_rate():
+    """Same rule group_lines applies: one service at two rates stays two rows,
+    and the quantities add up rather than being averaged."""
+    from modules.FIN01.proforma_pdf import flat_lines
+    rows = flat_lines([
+        {'service_name': 'Gangway', 'qty': 2, 'rate': 100, 'cgst_rate': 9, 'sgst_rate': 9, 'igst_rate': 18},
+        {'service_name': 'Gangway', 'qty': 3, 'rate': 100, 'cgst_rate': 9, 'sgst_rate': 9, 'igst_rate': 18},
+        {'service_name': 'Gangway', 'qty': 1, 'rate': 250, 'cgst_rate': 9, 'sgst_rate': 9, 'igst_rate': 18},
+    ])
+    assert [(r['label'], r['qty'], r['rate'], r['amount']) for r in rows] == [
+        ('Gangway', 5.0, 100.0, 500.0),
+        ('Gangway', 1.0, 250.0, 250.0),
+    ]
+    # and they sum to the subtotal without a heading double counting them
+    assert sum(r['amount'] for r in rows) == 750.0
+    assert all(r['indent'] is False for r in rows)
 
 
 def test_records_with_no_vcn_reference_still_print():

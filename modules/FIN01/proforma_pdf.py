@@ -160,6 +160,30 @@ def group_lines(lines):
     return rows
 
 
+def flat_lines(lines):
+    """One row per service, figures on the row itself.
+
+    group_lines splits a service into a heading plus a row per cargo, which is
+    what a cargo charge needs. A service charge has no cargo, so that detail
+    row would just repeat the heading — these lines carry their own figures
+    instead. Lines of one service priced differently keep separate rows, the
+    same rule group_lines applies.
+    """
+    order, rows = [], {}
+    for l in lines:
+        name = l.get('service_name') or l.get('service_code') or ''
+        key = (name, round(float(l.get('rate') or 0), 4), l.get('cargo_name') or '')
+        if key not in rows:
+            order.append(key)
+            rows[key] = {'label': ' - '.join(x for x in (name, key[2]) if x),
+                         'indent': False, 'qty': 0.0, 'rate': key[1], 'amount': 0.0,
+                         **{k: l.get(k) for k in ('cgst_rate', 'sgst_rate', 'igst_rate')}}
+        rows[key]['qty'] = round(rows[key]['qty'] + float(l.get('qty') or 0), 3)
+    for key in order:
+        rows[key]['amount'] = round(rows[key]['qty'] * rows[key]['rate'], 2)
+    return [rows[k] for k in order]
+
+
 def _rupees(amount):
     """Rupees and paise, half up.
 
