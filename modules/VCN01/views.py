@@ -270,6 +270,31 @@ def delete_delay():
     model.delete_delay(request.json.get('id'))
     return jsonify({'success': True})
 
+# Berthing delays endpoints — same rules as the delays above (permission only,
+# never gated on the Approved/billed lock); window comes from delay_window.
+@bp.route('/api/module/VCN01/berth_delays/<int:vcn_id>')
+@login_required
+def get_berth_delays(vcn_id):
+    return jsonify(model.get_berth_delays(vcn_id))
+
+@bp.route('/api/module/VCN01/berth_delays/save', methods=['POST'])
+@login_required
+def save_berth_delay():
+    perms = get_perms()
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission'}), 403
+    row_id = model.save_berth_delay(request.json)
+    return jsonify({'success': True, 'id': row_id})
+
+@bp.route('/api/module/VCN01/berth_delays/delete', methods=['POST'])
+@login_required
+def delete_berth_delay():
+    perms = get_perms()
+    if not perms.get('can_add') and not perms.get('can_edit'):
+        return jsonify({'error': 'No permission'}), 403
+    model.delete_berth_delay(request.json.get('id'))
+    return jsonify({'success': True})
+
 # IGM (FORM III) document — stored as BYTEA on vcn_header
 @bp.route('/api/module/VCN01/igm_doc/upload/<int:vcn_id>', methods=['POST'])
 @login_required

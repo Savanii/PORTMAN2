@@ -415,18 +415,23 @@ def export_all_parcels():
 
 
 def get_delay_window(vcn_id):
-    """LDUD01's Anchorage / Pilot Pickup times — the window pre-berthing delays
-    must fall inside. Either may be unset; the UI then enforces only what it has."""
+    """LDUD01's bounding times for both delay sub-tables: Anchorage / Pilot Pickup
+    for pre-berthing, Along Side / Cast Off for berthing. Any may be unset; the
+    UI then enforces only what it has."""
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('''SELECT anchored_datetime, pilot_pickup_time, nor_accepted FROM ldud_header
+    cur.execute('''SELECT anchored_datetime, pilot_pickup_time, nor_accepted,
+                          alongside_datetime, cast_off_datetime FROM ldud_header
                    WHERE vcn_id=%s AND is_deleted IS NOT TRUE ORDER BY id DESC LIMIT 1''', [vcn_id])
     row = cur.fetchone() or {}
     conn.close()
     return {'anchored': row.get('anchored_datetime') or '',
             'pilot_pickup': row.get('pilot_pickup_time') or '',
             # display only — NOR Accepted doesn't bound the delay window
-            'nor_accepted': row.get('nor_accepted') or ''}
+            'nor_accepted': row.get('nor_accepted') or '',
+            # berthing-delay window
+            'alongside': row.get('alongside_datetime') or '',
+            'cast_off': row.get('cast_off_datetime') or ''}
 
 
 def get_export_parcel(row_id):
@@ -595,6 +600,43 @@ def delete_delay(row_id):
     conn = get_db()
     cur = get_cursor(conn)
     cur.execute('DELETE FROM vcn_delays WHERE id=%s', (row_id,))
+    conn.commit()
+    conn.close()
+
+# Berthing delays sub-table (Along Side -> Cast Off window). Same shape as the
+# pre-berthing delays above, own table so RP01's vcn_delays reports don't pick
+# these up. See jnpa69_vcn_berth_delays.
+def get_berth_delays(vcn_id):
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('SELECT * FROM vcn_berth_delays WHERE vcn_id=%s ORDER BY id', (vcn_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def save_berth_delay(data):
+    _clean_empty(data)
+    conn = get_db()
+    cur = get_cursor(conn)
+    vals = [data.get('port_type'), data.get('service_type'),
+            data.get('delay_start'), data.get('delay_end')]
+    if data.get('id'):
+        cur.execute('UPDATE vcn_berth_delays SET port_type=%s, service_type=%s, '
+                    'delay_start=%s, delay_end=%s WHERE id=%s', vals + [data['id']])
+        row_id = data['id']
+    else:
+        cur.execute('INSERT INTO vcn_berth_delays (vcn_id, port_type, service_type, '
+                    'delay_start, delay_end) VALUES (%s, %s, %s, %s, %s) RETURNING id',
+                    [data['vcn_id']] + vals)
+        row_id = cur.fetchone()['id']
+    conn.commit()
+    conn.close()
+    return row_id
+
+def delete_berth_delay(row_id):
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('DELETE FROM vcn_berth_delays WHERE id=%s', (row_id,))
     conn.commit()
     conn.close()
 

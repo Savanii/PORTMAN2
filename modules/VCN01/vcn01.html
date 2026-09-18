@@ -462,7 +462,8 @@
     let defaultDocSeries = '';
     let runTypes = [];   // VRT01 Vessel Run Type Master
     let delayTypes = [];
-    const delayWindows = {};   // vcn_id -> {anchored, pilot_pickup} from LDUD01 (bounds delay entry)
+    const delayWindows = {};   // vcn_id -> LDUD01 times bounding both delay tables:
+                               // {anchored, pilot_pickup} pre-berthing, {alongside, cast_off} berthing
     let cargoNames = [];
     let quantityUoms = [];
     let defaultUom = '';
@@ -1108,6 +1109,19 @@
                     <div id="delays-table-${vcnId}" class="sub-tabulator"></div>
                 </div>
             </div>
+            <div class="sub-section">
+                <div class="sub-section-header" data-section="berth_delays">
+                    <span>Berthing Delays${(!isUnlocked && canDelays) ? ` <span style="font-weight:400;font-size:11px;color:#2f855a;">· always editable</span>` : ''}</span>
+                    <div class="sub-section-actions">
+                        ${canDelays ? `<button class="btn-sub-add" onclick="addSubRow('berth_delays', ${vcnId})">+ Add</button>` : ''}
+                        ${canDelays ? `<button class="btn-sub-save" onclick="saveSubTable('berth_delays', ${vcnId})">Save</button>` : ''}
+                    </div>
+                </div>
+                <div class="sub-section-content">
+                    <div id="berth-window-${vcnId}" style="padding:5px 10px;font-size:11px;color:#4a5568;"></div>
+                    <div id="berth-delays-table-${vcnId}" class="sub-tabulator"></div>
+                </div>
+            </div>
             `;
 
         // Append to modal body
@@ -1165,6 +1179,9 @@
     // ── Pre-berthing delay window (LDUD01 Anchorage → Pilot Pickup) ─────────────
     function _dtVal(v) { const d = v ? new Date(String(v).replace(' ', 'T')) : null; return (d && !isNaN(d)) ? d : null; }
 
+    const _winChip = (label, v) => `<span style="display:inline-block;background:#edf2f7;border-radius:10px;padding:1px 9px;margin-right:6px;">`
+        + `${label}: <b>${v ? formatDateTime(v) : '—'}</b></span>`;
+
     function renderDelayWindow(vcnId) {
         const el = document.getElementById(`delay-window-${vcnId}`);
         if (!el) return;
@@ -1173,29 +1190,47 @@
             el.innerHTML = '<span style="color:#a0aec0;">No Anchorage / Pilot Pickup time in LDUD01 yet — delay times are unbounded.</span>';
             return;
         }
-        const chip = (label, v) => `<span style="display:inline-block;background:#edf2f7;border-radius:10px;padding:1px 9px;margin-right:6px;">`
-            + `${label}: <b>${v ? formatDateTime(v) : '—'}</b></span>`;
-        el.innerHTML = chip('Anchorage', w.anchored) + chip('NOR Accepted', w.nor_accepted)
-            + chip('Pilot Pickup', w.pilot_pickup)
+        el.innerHTML = _winChip('Anchorage', w.anchored) + _winChip('NOR Accepted', w.nor_accepted)
+            + _winChip('Pilot Pickup', w.pilot_pickup)
             + '<span style="color:#718096;">delays must fall inside the Anchorage → Pilot Pickup window</span>';
     }
 
+    // Same, for the berthing delays (LDUD01 Along Side → Cast Off).
+    function renderBerthWindow(vcnId) {
+        const el = document.getElementById(`berth-window-${vcnId}`);
+        if (!el) return;
+        const w = delayWindows[vcnId] || {};
+        if (!w.alongside && !w.cast_off) {
+            el.innerHTML = '<span style="color:#a0aec0;">No Along Side / Cast Off time in LDUD01 yet — delay times are unbounded.</span>';
+            return;
+        }
+        el.innerHTML = _winChip('Along Side', w.alongside) + _winChip('Cast Off', w.cast_off)
+            + '<span style="color:#718096;">delays must fall inside the Along Side → Cast Off window</span>';
+    }
+
     // Delay times must sit inside the LDUD window, and End must follow Start.
+    // kind picks the window: 'preberth' (Anchorage → Pilot Pickup) or 'berth'
+    // (Along Side → Cast Off). Both tables use delay_start / delay_end.
+    const DELAY_BOUNDS = {
+        preberth: {lo: 'anchored',  hi: 'pilot_pickup', loLabel: 'Anchorage',  hiLabel: 'Pilot Pickup'},
+        berth:    {lo: 'alongside', hi: 'cast_off',     loLabel: 'Along Side', hiLabel: 'Cast Off'},
+    };
     let _delayGuard = false;   // stops the revert's setValue re-entering this handler
-    function validateDelayTime(cell) {
+    function validateDelayTime(cell, kind = 'preberth') {
         if (_delayGuard) return;
         const d = cell.getRow().getData();
         const val = _dtVal(cell.getValue());
         if (!val) return;
         const w = delayWindows[d.vcn_id || currentVcnId] || {};
+        const b = DELAY_BOUNDS[kind];
         const title = cell.getColumn().getDefinition().title;
         const revert = (msg) => {
             alert(msg);
             _delayGuard = true; cell.setValue(cell.getOldValue() || ''); _delayGuard = false;
         };
-        const anc = _dtVal(w.anchored), pil = _dtVal(w.pilot_pickup);
-        if (anc && val < anc) return revert(`${title} cannot be before the Anchorage time (${formatDateTime(w.anchored)}).`);
-        if (pil && val > pil) return revert(`${title} cannot be after the Pilot Pickup time (${formatDateTime(w.pilot_pickup)}).`);
+        const lo = _dtVal(w[b.lo]), hi = _dtVal(w[b.hi]);
+        if (lo && val < lo) return revert(`${title} cannot be before the ${b.loLabel} time (${formatDateTime(w[b.lo])}).`);
+        if (hi && val > hi) return revert(`${title} cannot be after the ${b.hiLabel} time (${formatDateTime(w[b.hi])}).`);
         const s = _dtVal(d.delay_start), e = _dtVal(d.delay_end);
         if (s && e && e < s) return revert('End Time cannot be before Start Time.');
     }
@@ -1366,6 +1401,45 @@
         });
         if (isDark) document.querySelector(`#delays-table-${vcnId}`).classList.add('tabulator-dark');
 
+        // Berthing delays — same grid, bounded by Along Side -> Cast Off instead,
+        // classified Port/Non Port and Marine/Operations. Like the delays above it
+        // ignores the Approved/billed lock (canDelays), since delays surface late.
+        renderBerthWindow(vcnId);
+        subTables[vcnId].berth_delays = new Tabulator(`#berth-delays-table-${vcnId}`, {
+            layout: "fitColumns",
+            height: 150,
+            ajaxURL: `/api/module/VCN01/berth_delays/${vcnId}`,
+            columnDefaults: { headerSort: false },
+            cellEdited: () => markDirty('berth_delays'),
+            columns: [
+                {title: "Port/Non Port", field: "port_type", widthGrow: 1, editor: canDelays ? "list" : false,
+                    editorParams: {values: {"Port": "Port", "Non Port": "Non Port"}, allowEmpty: true, listOnEmpty: true}
+                },
+                {title: "Marine/Operations", field: "service_type", widthGrow: 1, editor: canDelays ? "list" : false,
+                    editorParams: {values: {"Marine": "Marine", "Operations": "Operations"}, allowEmpty: true, listOnEmpty: true}
+                },
+                {title: "Start Time", field: "delay_start", widthGrow: 1, editor: canDelays ? datetimeEditor : false,
+                    formatter: datetimeCellFormatter, cellEdited: (cell) => validateDelayTime(cell, 'berth')
+                },
+                {title: "End Time", field: "delay_end", widthGrow: 1, editor: canDelays ? datetimeEditor : false,
+                    formatter: datetimeCellFormatter, cellEdited: (cell) => validateDelayTime(cell, 'berth')
+                },
+                {title: "Total Time", field: "total_time", widthGrow: 1, hozAlign: "center", headerSort: false, editable: false,
+                    formatter: function(cell) {
+                        const row = cell.getRow().getData();
+                        if (!row.delay_start || !row.delay_end) return '';
+                        const mins = delayRowMins(row);
+                        if (mins < 0) return '<span style="color:#e53e3e">Invalid</span>';
+                        return `<span style="font-weight:500;color:#2d3748">${formatMins(mins)}</span>`;
+                    }
+                },
+                canDelays ? {title: "", field: "actions", formatter: deleteButtonFormatter, width: 60, widthGrow: 0, hozAlign: "center", headerSort: false,
+                    cellClick: function(e, cell) { deleteSubRow('berth_delays', cell.getRow().getData().id, vcnId); }
+                } : null
+            ].filter(Boolean)
+        });
+        if (isDark) document.querySelector(`#berth-delays-table-${vcnId}`).classList.add('tabulator-dark');
+
         // Quantity UOM options
         const uomOptions = {};
         quantityUoms.forEach(u => { uomOptions[u] = u; });
@@ -1487,6 +1561,14 @@
             seed.delay_start = prevEnd || w.anchored || '';
             seed.delay_end = w.pilot_pickup || '';
         }
+        if (type === 'berth_delays') {
+            const w = delayWindows[vcnId] || {};
+            const t = subTables[vcnId] && subTables[vcnId].berth_delays;
+            const rows = t ? t.getRows() : [];
+            const prevEnd = rows.length ? rows[rows.length - 1].getData().delay_end : '';
+            seed.delay_start = prevEnd || w.alongside || '';
+            seed.delay_end = w.cast_off || '';
+        }
         const res = await fetch(`/api/module/VCN01/${type}/save`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -1500,7 +1582,7 @@
         if (data.id && subTables[vcnId] && subTables[vcnId][type]) {
             const newRow = {id: data.id, vcn_id: vcnId};
             if (type === 'consigners') newRow.toll_applicable = true;
-            if (type === 'delays') {
+            if (type === 'delays' || type === 'berth_delays') {
                 if (seed.delay_start) newRow.delay_start = seed.delay_start;
                 if (seed.delay_end) newRow.delay_end = seed.delay_end;
             }

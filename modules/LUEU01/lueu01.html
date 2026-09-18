@@ -472,6 +472,13 @@
 
   function currentShift() { const h = new Date().getHours(); return h >= 6 && h < 14 ? 'A' : h >= 14 && h < 22 ? 'B' : 'C'; }
   function _tmin(hhmm) { const a = String(hhmm).split(':'); return (+a[0] || 0) * 60 + (+a[1] || 0); }
+  // To defaults to one hour after From; wraps past midnight, which rowHours
+  // already reads as a next-day interval.
+  function _plusHour(hhmm) {
+    if (!hhmm) return '';
+    const m = (_tmin(hhmm) + 60) % 1440;
+    return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  }
   // UTC-based so the local timezone can't shift the date back (e.g. IST +5:30).
   function _addDays(dateStr, n) {
     const [y, m, d] = dateStr.split('-').map(Number);
@@ -485,7 +492,8 @@
     if (!t) return;
     if (!parcelStart[pid]) { alert('Enter the parcel Start time before adding log rows.'); return; }
     const rows = t.getRows();
-    // First row seeds date + From from the parcel Start; later rows chain From = previous To.
+    // First row seeds date + From from the parcel Start; later rows chain From =
+    // previous To. Either way To is seeded an hour on, so a row lands complete.
     const start = parcelStart[pid] || '';
     let date, from;
     if (rows.length) {
@@ -504,7 +512,8 @@
     // medium must be Equipment or save_log would null the equipment out.
     const equip = (parcelEquip[pid] || '').split(',')[0].trim();
     t.addRow({
-      parcel_op_id: pid, entry_date: date, from_time: from, shift: currentShift(),
+      parcel_op_id: pid, entry_date: date, from_time: from, to_time: _plusHour(from),
+      shift: currentShift(),
       medium: equip ? 'Equipment' : 'Direct Pipe', equipment_name: equip,
       quantity_uom: masters.uom.default, berth_name: defaultBerth
     }, false).then(row => { recomputeTotals(pid); row.scrollTo().catch(() => {}); });
