@@ -1005,6 +1005,15 @@ def cutover_state():
     })
 
 
+@bp.route('/api/cutover/parties')
+@admin_required
+def cutover_parties():
+    """Parties with cargo or service records to flag — the cutover's own
+    picker, not the full customer master."""
+    from . import cutover
+    return jsonify({'data': cutover.get_parties(request.args.get('customer_type'))})
+
+
 @bp.route('/api/cutover/invoice-seed', methods=['POST'])
 @admin_required
 def cutover_invoice_seed():

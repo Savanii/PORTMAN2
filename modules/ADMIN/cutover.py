@@ -390,3 +390,67 @@ def unmark_services_billed(service_ids, performed_by):
     conn.commit()
     conn.close()
     return released
+
+
+# ---------------------------------------------------------------------------
+# Party picker
+# ---------------------------------------------------------------------------
+
+# customer_type -> (master table, extra WHERE). Whitelist, not interpolation
+# of user input: the table name goes into the SQL text.
+_PARTY_MASTERS = {
+    'Customer': ('vessel_customers', ''),
+    'Agent': ('vessel_agents', 'AND m.is_active = 1'),
+}
+
+
+def get_parties(customer_type):
+    """Parties the cutover can actually act on, with what they hold.
+
+    The full customer master is 45 rows here and almost all of them have
+    nothing to flag, so picking one just showed empty tables. This lists only
+    parties that hold cargo parcels or approved service records — the rows
+    get_cargo/get_services would return.
+
+    Deliberately NOT filtered on having a PORTMAN2 bill: cutover exists to
+    flag work the *legacy* system billed, which by definition has no bill
+    here. Filtering that way hid the only party with cargo.
+
+    A party whose work is already cutover-flagged still appears: the flag
+    lives in parcel_charge_billed (or is_billed on the record), never on the
+    parcel, so it is still there to be reopened.
+    """
+    master = _PARTY_MASTERS.get(customer_type)
+    if not master:
+        return []
+    table, active = master
+    conn = get_db()
+    cur = get_cursor(conn)
+    # One query — a per-party count would open a connection each time.
+    cur.execute(f'''
+        WITH parcels AS (
+            SELECT importer_name AS name, COUNT(*) AS n FROM (
+                SELECT importer_name FROM vcn_consigners
+                 WHERE COALESCE(is_removed, FALSE) = FALSE AND importer_name IS NOT NULL
+                UNION ALL
+                SELECT importer_name FROM vcn_export_cargo_declaration
+                 WHERE COALESCE(is_removed, FALSE) = FALSE AND importer_name IS NOT NULL
+            ) p GROUP BY importer_name
+        ),
+        svcs AS (
+            SELECT source_id AS id, COUNT(*) AS n FROM service_records
+             WHERE doc_status = 'Approved' AND source_type = %s
+             GROUP BY source_id
+        )
+        SELECT m.id, m.name,
+               COALESCE(p.n, 0) AS parcels,
+               COALESCE(s.n, 0) AS services
+        FROM {table} m
+        LEFT JOIN parcels p ON p.name = m.name
+        LEFT JOIN svcs    s ON s.id  = m.id
+        WHERE (COALESCE(p.n, 0) > 0 OR COALESCE(s.n, 0) > 0) {active}
+        ORDER BY m.name
+    ''', [customer_type])
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows

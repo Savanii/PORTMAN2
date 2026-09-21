@@ -848,13 +848,25 @@ async function saveCutoverSeed(kind) {
 }
 
 async function loadCutoverCustomers() {
-    // Full master on purpose: cutover works on cargo that is already flagged billed.
+    // Only parties that actually hold cargo parcels or service records — the
+    // full master is mostly rows with nothing to flag, which just showed
+    // empty tables. Already-flagged parties still appear, so they can be
+    // reopened.
     const ct = document.getElementById('cutCustType').value;
     const sel = document.getElementById('cutCustomer');
-    const res = await fetch(`/api/module/FIN01/customers/${ct}`);
+    const res = await fetch('/admin/api/cutover/parties?customer_type=' + encodeURIComponent(ct));
     const d = await res.json();
-    sel.innerHTML = '<option value="">-- Select --</option>' +
-        (d.data || []).map(c => `<option value="${c.name}" data-id="${c.id}">${c.name}</option>`).join('');
+    const rows = d.data || [];
+    sel.innerHTML = '<option value="">-- Select --</option>' + rows.map(c => {
+        const bits = [];
+        if (c.parcels)  bits.push(c.parcels + ' parcel' + (c.parcels > 1 ? 's' : ''));
+        if (c.services) bits.push(c.services + ' service' + (c.services > 1 ? 's' : ''));
+        const label = c.name + (bits.length ? '  (' + bits.join(', ') + ')' : '');
+        return `<option value="${c.name}" data-id="${c.id}">${label}</option>`;
+    }).join('');
+    if (!rows.length) {
+        sel.innerHTML = `<option value="">-- No ${ct.toLowerCase()} has cargo or services to flag --</option>`;
+    }
     loadCutoverParty();
 }
 
