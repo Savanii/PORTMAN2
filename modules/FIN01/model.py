@@ -250,6 +250,9 @@ def save_bill_line(data):
     tds_applicable = int(data.get('tds_applicable') or 0)
     tds_percent = float(data.get('tds_percent') or 0)
     tds_amount = float(data.get('tds_amount') or 0)
+    # An amount the caller actually sent is honoured; anything else is derived
+    # below from the rate, once the line amount is settled.
+    tds_amount_given = str(data.get('tds_amount') or '').strip() not in ('', '0')
     tcs_applicable = int(data.get('tcs_applicable') or 0)
     tcs_percent = float(data.get('tcs_percent') or 0)
     tcs_amount = float(data.get('tcs_amount') or 0)
@@ -272,12 +275,14 @@ def save_bill_line(data):
             # sap_gl_account still posts to the right GL.
             if not data.get('gl_code'):
                 data['gl_code'] = svc.get('sap_gl_account') or svc.get('gl_code') or ''
-            # TDS — calculated on basic amount only
+            # TDS — the master supplies the rate; the amount is computed below
+            # alongside TCS. Computing it here only covered the case where the
+            # caller said nothing about TDS, but the billing screen always
+            # sends tds_applicable from the same master — so this branch was
+            # skipped exactly when TDS applied, and the amount stayed 0.
             if not data.get('tds_applicable') and svc.get('is_tds'):
                 tds_applicable = 1
                 tds_percent = float(svc.get('tds_percent') or 0)
-                line_amount = float(data.get('line_amount') or 0)
-                tds_amount = round(line_amount * tds_percent / 100, 2)
             # TCS — calculated on basic + GST (set after GST computation below)
             if not data.get('tcs_applicable') and svc.get('is_tcs'):
                 tcs_applicable = 1
@@ -332,6 +337,10 @@ def save_bill_line(data):
     sa = float(data.get('sgst_amount') or 0)
     ia = float(data.get('igst_amount') or 0)
     data['line_total'] = round(la + ca + sa + ia, 2)
+
+    # TDS — on the basic only, never on the GST.
+    if tds_applicable and tds_percent > 0 and not tds_amount_given:
+        tds_amount = round(la * tds_percent / 100, 2)
 
     # TCS — calculated on basic + GST
     if tcs_applicable and tcs_percent > 0:

@@ -121,6 +121,7 @@
                     <th>Agreement</th>
                     <th>Source</th>
                     <th>Customer</th>
+                    <th>Consignee A/C</th>
                     <th style="text-align:right;">Subtotal</th>
                     <th style="text-align:right;">GST</th>
                     <th style="text-align:right;">Total</th>
@@ -150,13 +151,22 @@
                     <td>{{ row.agreement_display or '-' }}</td>
                     <td>{% if row.source_display %}<span class="source-badge">{{ row.source_type }}: {{ row.source_display }}</span>{% endif %}</td>
                     <td>{{ row.customer_name }}</td>
+                    {# The payer is billed on account of whoever the cargo is
+                       consigned to; one payer can have several. #}
+                    <td>
+                        {%- for ac in row.consignees -%}
+                        <div style="white-space:nowrap;">A/C {{ ac }}</div>
+                        {%- else -%}
+                        <span style="color:#a0aec0;">&mdash;</span>
+                        {%- endfor -%}
+                    </td>
                     <td class="num">{{ "%.2f"|format(row.subtotal) }}</td>
                     <td class="num">{{ "%.2f"|format(row.cgst_amount + row.sgst_amount + row.igst_amount) }}</td>
                     <td class="num"><strong>{{ "%.2f"|format(row.total_amount) }}</strong></td>
                     <td>{{ row.currency_code }}</td>
                 </tr>
                 <tr id="lines-row-{{ row.id }}">
-                    <td colspan="11" style="padding:0;">
+                    <td colspan="12" style="padding:0;">
                         <div class="bill-lines-panel" id="lines-panel-{{ row.id }}">
                             <div id="lines-content-{{ row.id }}"><em style="font-size:10px;color:var(--text-secondary);">Loading…</em></div>
                         </div>
@@ -164,7 +174,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="11" style="text-align:center;color:var(--text-secondary);padding:24px;">
+                    <td colspan="12" style="text-align:center;color:var(--text-secondary);padding:24px;">
                         No approved bills available for invoicing.
                     </td>
                 </tr>
@@ -635,10 +645,12 @@ async function confirmGenerateInvoice() {
     const result = await res.json();
     if (result.success) {
         if (confirm(`Invoice ${result.invoice_number} generated!\nOpen print view now?`)) {
-            location.href = `/module/FINV01/invoice/print/${result.id}`;
-        } else {
-            location.href = '/module/FINV01/invoices';
+            // New tab: the print view is a dead end with only a Back button,
+            // and leaving this tab on the invoice list lets the operator
+            // print and carry on billing without navigating back.
+            window.open(`/module/FINV01/invoice/print/${result.id}`, '_blank');
         }
+        location.href = '/module/FINV01/invoices';
     } else {
         alert('Error: ' + (result.error || 'Failed to generate invoice'));
     }

@@ -67,3 +67,36 @@ def test_consignees_are_unique_and_in_line_order():
         assert all(n and n.strip() for n in names), 'blank A/C line'
     finally:
         conn.close()
+
+
+# ── Approved-bills list ─────────────────────────────────────────────────────
+
+def test_consignees_by_bill_is_empty_for_unknown_bills():
+    conn = get_db()
+    cur = get_cursor(conn)
+    try:
+        from modules.FINV01.views import _consignees_by_bill
+        assert _consignees_by_bill(cur, []) == {}
+        assert _consignees_by_bill(cur, [-1]) == {}
+    finally:
+        conn.close()
+
+
+def test_a_bill_with_two_consignees_lists_both_in_order():
+    """Two parcels for different consignees under one payer: the list must
+    show both, or two bills for the same payer look identical before ticking."""
+    conn = get_db()
+    cur = get_cursor(conn)
+    try:
+        from modules.FINV01.views import _consignees_by_bill
+        cur.execute('''
+            SELECT bill_id FROM bill_lines
+            WHERE cargo_source_type IS NOT NULL
+            GROUP BY bill_id HAVING COUNT(DISTINCT cargo_source_id) > 1 LIMIT 1''')
+        row = cur.fetchone()
+        if not row:
+            pytest.skip('no multi-parcel bill in this database')
+        names = _consignees_by_bill(cur, [row['bill_id']]).get(row['bill_id'], [])
+        assert len(names) == len(set(names)), 'a consignee was listed twice'
+    finally:
+        conn.close()

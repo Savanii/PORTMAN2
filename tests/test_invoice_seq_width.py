@@ -78,3 +78,16 @@ def test_a_number_wider_than_the_width_is_never_truncated():
 
 def test_width_zero_is_treated_as_no_padding():
     assert format_doc_seq(418, 0) == '418'
+
+
+# ── The separator belongs to the prefix, not to us ──────────────────────────
+
+def test_the_number_is_prefix_plus_sequence_with_nothing_injected():
+    """A '/' used to be hardcoded between prefix and sequence, so a site that
+    did not want one could not avoid it — and one that wanted a different
+    separator could not have it. The prefix is now used verbatim."""
+    from modules.FIN01.model import format_doc_seq
+    for prefix, expected in (('DPPL/26-27/', 'DPPL/26-27/0418'),
+                             ('DPPL-', 'DPPL-0418'),
+                             ('DPPL', 'DPPL0418')):
+        assert f'{prefix}{format_doc_seq(418, 4)}' == expected

@@ -197,6 +197,16 @@ def generate_invoice():
     # Get all approved bills not yet invoiced
     approved_bills, _ = model.get_bill_data(page=1, size=1000, status_filter='Approved')
 
+    # Consignees per bill, so two bills for the same payer are tellable apart
+    # before they are ticked. One query for the whole list, not per row.
+    conn_c = get_db()
+    try:
+        by_bill = _consignees_by_bill(get_cursor(conn_c), [b['id'] for b in approved_bills])
+    finally:
+        conn_c.close()
+    for b in approved_bills:
+        b['consignees'] = by_bill.get(b['id'], [])
+
     from datetime import datetime
     current_date = datetime.now().strftime('%Y-%m-%d')
 
@@ -284,9 +294,12 @@ def create_invoice_record(customer_type, customer_id, bill_ids, created_by, over
     customer_id = customer_id or first_bill.get('customer_id')
     customer_master = _get_customer_master_snapshot(cur, customer_type, customer_id)
 
+    # The prefix is used verbatim: a trailing '/' or '-' is the operator's to
+    # configure in INVDS01, so it must survive. rstrip('/') here used to remove
+    # it, which is why the separator had to be hardcoded below.
     doc_series_prefix = (
         default_series.get('prefix') or overrides.get('doc_series_prefix') or 'INV'
-    ).strip().rstrip('/').upper()
+    ).strip().upper()
 
     invoice_date = overrides.get('invoice_date') or str(first_bill.get('bill_date') or '')[:10]
     if not invoice_date:
@@ -347,7 +360,9 @@ def create_invoice_record(customer_type, customer_id, bill_ids, created_by, over
         'total_amount': totals.get('total_amount'),
         'created_by': created_by,
         'created_date': datetime.now().strftime('%Y-%m-%d'),
-        '_invoice_number_override': f'{doc_series_prefix}/{seq_text}',
+        # Prefix + sequence, nothing in between: a separator is part of the
+        # prefix the operator configured, not something to inject here.
+        '_invoice_number_override': f'{doc_series_prefix}{seq_text}',
     }
     for key, val in overrides.items():
         if key == 'doc_series_prefix' or val is None:
@@ -484,6 +499,57 @@ def _cargo_names_for_invoice(cur, invoice_id):
     return names
 
 
+def _consignee_name_map(cur, pairs):
+    """{(cargo_source_type, cargo_source_id): consignee} for the parcels given.
+
+    One query per parcel table, never per parcel.
+    """
+    by_src = {}
+    for src, cid in pairs:
+        by_src.setdefault(src, set()).add(cid)
+    found = {}
+    for src, ids in by_src.items():
+        table = _PARCEL_TABLES.get(src)
+        if not table or not ids:
+            continue
+        cur.execute(f'SELECT id, consigner_name FROM {table} WHERE id = ANY(%s)', [sorted(ids)])
+        for row in cur.fetchall():
+            found[(src, row['id'])] = (row['consigner_name'] or '').strip()
+    return found
+
+
+def _consignees_by_bill(cur, bill_ids):
+    """{bill_id: [consignee, ...]} in line order, without repeats.
+
+    Shown on the approved-bills list so the operator can tell two bills for the
+    same payer apart before ticking them — the payer column alone cannot.
+    """
+    if not bill_ids:
+        return {}
+    cur.execute('''
+        SELECT bl.bill_id, bl.cargo_source_type AS src, bl.cargo_source_id AS cid,
+               MIN(bl.id) AS ord
+        FROM bill_lines bl
+        WHERE bl.bill_id = ANY(%s)
+          AND bl.cargo_source_type IS NOT NULL AND bl.cargo_source_id IS NOT NULL
+        GROUP BY bl.bill_id, bl.cargo_source_type, bl.cargo_source_id
+        ORDER BY bl.bill_id, ord
+    ''', [list(bill_ids)])
+    ordered = [(r['bill_id'], r['src'], r['cid']) for r in cur.fetchall()]
+    names = _consignee_name_map(cur, [(s, c) for _, s, c in ordered])
+
+    out = {}
+    for bill_id, src, cid in ordered:
+        name = names.get((src, cid))
+        if not name:
+            continue
+        seen = out.setdefault(bill_id, [])
+        if name not in seen:
+            seen.append(name)
+    return out
+
+
+
 def _invoice_consignees(cur, invoice_id):
     """Consignees of the parcels on this invoice, in line order, no repeats.
 
@@ -510,18 +576,7 @@ def _invoice_consignees(cur, invoice_id):
     if not ordered:
         return []
 
-    by_src = {}
-    for src, cid in ordered:
-        by_src.setdefault(src, []).append(cid)
-
-    found = {}
-    for src, ids in by_src.items():
-        table = _PARCEL_TABLES.get(src)
-        if not table:
-            continue
-        cur.execute(f'SELECT id, consigner_name FROM {table} WHERE id = ANY(%s)', [ids])
-        for row in cur.fetchall():
-            found[(src, row['id'])] = (row['consigner_name'] or '').strip()
+    found = _consignee_name_map(cur, ordered)
 
     names = []
     for key in ordered:
