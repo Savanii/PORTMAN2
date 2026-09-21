@@ -519,6 +519,19 @@ def get_invoice_data(page=1, size=20, status_filter=None):
     return [dict(r) for r in rows], total
 
 
+_INVOICE_HEADER_COLUMNS = None
+
+
+def _invoice_header_columns(cur):
+    """Column names of invoice_header, read once per process."""
+    global _INVOICE_HEADER_COLUMNS
+    if _INVOICE_HEADER_COLUMNS is None:
+        cur.execute("""SELECT column_name FROM information_schema.columns
+                       WHERE table_name = 'invoice_header'""")
+        _INVOICE_HEADER_COLUMNS = {r['column_name'] for r in cur.fetchall()}
+    return _INVOICE_HEADER_COLUMNS
+
+
 def create_invoice_from_bills(bill_ids, invoice_data):
     """Create invoice from approved bills"""
     conn = get_db()
@@ -546,8 +559,12 @@ def create_invoice_from_bills(bill_ids, invoice_data):
     invoice_data['invoice_number'] = invoice_number
     invoice_data['financial_year'] = financial_year
 
-    # Insert invoice header
-    cols = [k for k in invoice_data if k not in ('id', '_invoice_number_override')]
+    # Insert invoice header. Only real columns: the FINV01 screen posts display
+    # fields alongside the header data (doc_series_name is one), and the whole
+    # request is merged into invoice_data — so anything that is not a column
+    # would land in the INSERT list and 500 the request.
+    cols = [k for k in _invoice_header_columns(cur)
+            if k in invoice_data and k not in ('id', '_invoice_number_override')]
     cur.execute(f'''INSERT INTO invoice_header
         ({', '.join(cols)})
         VALUES ({', '.join(['%s']*len(cols))})
