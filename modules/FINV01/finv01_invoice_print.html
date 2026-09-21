@@ -448,8 +448,10 @@
         <div class="header-logo">
             <img src="/static/img/invoice_header.png" alt="JSW Dharamtar Port Pvt. Ltd." style="max-height:52px; width:auto; display:block; margin:0 auto;">
             <div style="font-size:15px;color:#2d3748;line-height:1.55;margin-top:4px;text-align:center;">
-                At:Dharamtar, Post:Dolvi, Tal: Pen, Dist:Raigad,<br>
-                Mumbai, Maharashtra, India - 402107<br>
+                D Wing, 5th Floor, Unit No. DN 506,<br>
+                NMSEZ Commercial Business Complex,<br>
+                Dronagiri Mandir Road, Plot No.6, Sector 11,<br>
+                Navi Mumbai- 400 702.<br>
                 Phone: 02143-277620 &nbsp;&nbsp; Fax: 02143-277800<br>
                 Email: jetty.accounts@jsw.in &nbsp;&nbsp; Website: www.jsw.in<br>
                 <strong>GSTIN: 27AACCJ9361Q1ZS</strong>
@@ -502,6 +504,12 @@
         <div class="party-col">
             <div class="party-heading">Billed To :</div>
             <div class="party-name">{{ invoice.customer_name }}</div>
+            {# The payer is billed on account of whoever the VCN consigns the
+               cargo to, so each consignee on this invoice gets its own A/C
+               line under the name — same as the pro forma. #}
+            {% for ac in ac_names %}
+            <div class="party-name">A/C {{ ac }}</div>
+            {% endfor %}
             {% if invoice.billing_address %}<div class="party-line">{{ invoice.billing_address }}</div>{% endif %}
             {% if invoice.customer_city %}
             <div class="party-line">{{ invoice.customer_city }}{% if invoice.customer_pincode %} {{ invoice.customer_pincode }}{% endif %}</div>

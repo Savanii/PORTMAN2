@@ -484,6 +484,54 @@ def _cargo_names_for_invoice(cur, invoice_id):
     return names
 
 
+def _invoice_consignees(cur, invoice_id):
+    """Consignees of the parcels on this invoice, in line order, no repeats.
+
+    They print under the billed party as 'A/C <consignee>', the same way the
+    pro forma does (FIN01.views._parcel_consignees): the invoice goes to
+    whoever the VCN names as paying, on account of whoever the cargo is
+    consigned to. One vessel can carry parcels for several consignees under
+    one payer, so this is a list rather than a single name.
+
+    VCN01 labels the column Consignee; both parcel tables have always called
+    it consigner_name.
+    """
+    cur.execute('''
+        SELECT bl.cargo_source_type AS src, bl.cargo_source_id AS cid,
+               MIN(ibm.id) AS o1, MIN(bl.id) AS o2
+        FROM invoice_bill_mapping ibm
+        JOIN bill_lines bl ON bl.bill_id = ibm.bill_id
+        WHERE ibm.invoice_id = %s
+          AND bl.cargo_source_type IS NOT NULL AND bl.cargo_source_id IS NOT NULL
+        GROUP BY bl.cargo_source_type, bl.cargo_source_id
+        ORDER BY o1, o2
+    ''', [invoice_id])
+    ordered = [(r['src'], r['cid']) for r in cur.fetchall()]
+    if not ordered:
+        return []
+
+    by_src = {}
+    for src, cid in ordered:
+        by_src.setdefault(src, []).append(cid)
+
+    found = {}
+    for src, ids in by_src.items():
+        table = _PARCEL_TABLES.get(src)
+        if not table:
+            continue
+        cur.execute(f'SELECT id, consigner_name FROM {table} WHERE id = ANY(%s)', [ids])
+        for row in cur.fetchall():
+            found[(src, row['id'])] = (row['consigner_name'] or '').strip()
+
+    names = []
+    for key in ordered:
+        name = found.get(key)
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+
 def _invoice_charge_lines(cur, invoice_id):
     """The invoice's billed lines with their cargo identity attached.
 
@@ -865,8 +913,11 @@ def print_invoice(invoice_id):
     # actually charged. One cursor for both — get_db() costs a connection.
     conn_d = get_db()
     try:
+        cur_d = get_cursor(conn_d)
         display_lines = _build_display_lines(
-            get_cursor(conn_d), invoice_id, invoice_lines, invoice.get('subtotal'))
+            cur_d, invoice_id, invoice_lines, invoice.get('subtotal'))
+        # 'A/C <consignee>' under the billed party, as the pro forma prints it.
+        ac_names = _invoice_consignees(cur_d, invoice_id)
     finally:
         conn_d.close()
     gst_lines = _gst_rate_lines(invoice_lines)
@@ -896,6 +947,7 @@ def print_invoice(invoice_id):
                          invoice_lines=invoice_lines,
                          display_lines=display_lines,
                          gst_lines=gst_lines,
+                         ac_names=ac_names,
                          sac_summary=sac_summary,
                          port_config=port_config,
                          payment_bank=payment_bank,
