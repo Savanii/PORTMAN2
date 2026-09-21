@@ -817,8 +817,8 @@ def statistics_report_index():
     start_y = today.year if today.month >= 4 else today.year - 1
     default_start_date = f"{start_y}-04-01"
     default_end_date = today.strftime('%Y-%m-%d')
-    default_start_datetime = f"{start_y}-04-01T00:00"
-    default_end_datetime = f"{today.strftime('%Y-%m-%d')}T23:59"
+    default_start_datetime = f"{start_y}-04-01T07:00"
+    default_end_datetime = f"{today.strftime('%Y-%m-%d')}T07:00"
 
     return render_template(
         'statistics_report/statistics_report.html',
@@ -871,9 +871,12 @@ def statistics_report_api_export():
 
     fin_year = request.args.get('fin_year', cur_fy).strip()
     month = request.args.get('month', cur_month).strip()
+    start_date = request.args.get('start_date', '').strip()
+    end_date = request.args.get('end_date', '').strip()
 
     try:
         data = get_other_statistics_data(fin_year, month)
+        data_analytics = get_detailed_analytics_data(fin_year, month, start_date, end_date)
     except Exception as e:
         return jsonify({'error': f'Export failed: {e}'}), 500
 
@@ -1107,6 +1110,8 @@ def statistics_report_api_export():
         ws5.cell(row=cur_row, column=c).fill = fill_total
         ws5.cell(row=cur_row, column=c).border = total_border
     auto_fit_columns(ws5, 11)
+
+    _generate_analytics_excel(data_analytics, wb)
 
     bio = io.BytesIO()
     wb.save(bio)
@@ -2616,6 +2621,13 @@ def get_detailed_analytics_data(
         parts = [p.strip() for p in _PIPE_SPLIT_RE.split(raw_pipe) if p.strip()]
         return parts or ['Flexible Hose']
 
+    _TERM_SPLIT_RE = re.compile(r',|\s+/\s+|/|\s+&\s+|\s+\+\s+')
+
+    def _split_terminal(raw_term):
+        raw_term = (raw_term or 'Unspecified Terminal').strip()
+        parts = [p.strip() for p in _TERM_SPLIT_RE.split(raw_term) if p.strip()]
+        return parts or ['Unspecified Terminal']
+
     # =========================================================================
     # PIPELINE UTILISATION
     #
@@ -2683,6 +2695,44 @@ def get_detailed_analytics_data(
 
         grand_total = sum(totals.values())
 
+        rows = []
+
+        for k, v in sorted(
+            totals.items(),
+            key=lambda x: -x[1]
+        ):
+            pct = (
+                v / grand_total * 100.0
+                if grand_total > 0
+                else 0.0
+            )
+            rows.append({
+                'name': k,
+                'qty_mt': round(v, 3),
+                'pct': round(pct, 1)
+            })
+
+        return {
+            'rows': rows,
+            'total_qty': round(grand_total, 3),
+            'total_pct': 100.0 if grand_total > 0 else 0.0
+        }
+
+    # =========================================================================
+    # TERMINAL WISE QTY
+    # =========================================================================
+    def _agg_terminal_qty():
+        totals = {}
+
+        for it in raw_items:
+            terms = _split_terminal(it.get('terminal'))
+            n = len(terms)
+            share = it['qty_mt'] / n if n > 0 else 0.0
+
+            for term in terms:
+                totals[term] = totals.get(term, 0.0) + share
+
+        grand_total = sum(totals.values())
         rows = []
 
         for k, v in sorted(
@@ -2784,7 +2834,7 @@ def get_detailed_analytics_data(
     return {
 
         'terminal_wise':
-            _agg_qty('terminal'),
+            _agg_terminal_qty(),
 
         'pipeline_wise':
             _agg_pipeline_qty(),
@@ -2929,7 +2979,7 @@ def statistics_report_api_export_analytics():
     )
 
 
-def _generate_analytics_excel(data: dict) -> Workbook:
+def _generate_analytics_excel(data: dict, wb: Workbook = None) -> Workbook:
     """
     Build the multi-category analytics Excel workbook.
 
@@ -2944,9 +2994,13 @@ def _generate_analytics_excel(data: dict) -> Workbook:
         Operation Stop
     """
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Analytics_Report"
+    if wb is None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Analytics_Report"
+    else:
+        ws = wb.create_sheet(title="Analytics_Report")
+
 
     font_title = Font(
         name="Calibri",
