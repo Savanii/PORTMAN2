@@ -58,6 +58,30 @@ def series_start_seq(cur, prefix):
     return int(row['start_seq']) if row and row['start_seq'] else None
 
 
+def series_seq_width(cur, prefix):
+    """INVDS01's printed width for one series prefix, or None for no padding.
+
+    Set when the operator typed Start At with a leading zero (0418 -> 4), so
+    the sequence stays the integer 418 while the printed number keeps its
+    width. Tolerates a pre-migration database like series_start_seq does."""
+    try:
+        cur.execute('SELECT MAX(seq_width) AS w FROM invoice_doc_series WHERE UPPER(prefix)=%s',
+                    [(prefix or '').strip().upper()])
+        row = cur.fetchone()
+    except Exception:
+        cur.connection.rollback()
+        return None
+    return int(row['w']) if row and row['w'] else None
+
+
+def format_doc_seq(seq, width):
+    """Printed sequence: zero-padded to `width`, or plain when there is none.
+
+    A number already longer than the width is never truncated — once a series
+    runs past 9999 it simply prints wider."""
+    return str(int(seq)).zfill(int(width)) if width else str(int(seq))
+
+
 def next_from_seed(current_max, seed):
     """Next sequence number: the natural increment, floored at the seed."""
     nxt = int(current_max or 0) + 1

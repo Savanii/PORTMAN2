@@ -294,6 +294,9 @@ def create_invoice_record(customer_type, customer_id, bill_ids, created_by, over
 
     fy_suffix = model.get_financial_year(invoice_date)
     next_seq = model.next_invoice_seq(cur, doc_series_prefix, fy_suffix)
+    # doc_series_seq stays the integer; only the printed number is padded, to
+    # the width the operator typed into INVDS01's Start At (0418 -> 4).
+    seq_text = model.format_doc_seq(next_seq, model.series_seq_width(cur, doc_series_prefix))
 
     # Default header totals from the bill(s) themselves — the request path
     # (create_invoice view) normally overrides these with frontend-computed
@@ -344,7 +347,7 @@ def create_invoice_record(customer_type, customer_id, bill_ids, created_by, over
         'total_amount': totals.get('total_amount'),
         'created_by': created_by,
         'created_date': datetime.now().strftime('%Y-%m-%d'),
-        '_invoice_number_override': f'{doc_series_prefix}/{next_seq}',
+        '_invoice_number_override': f'{doc_series_prefix}/{seq_text}',
     }
     for key, val in overrides.items():
         if key == 'doc_series_prefix' or val is None:

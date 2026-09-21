@@ -1,10 +1,35 @@
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify
+from flask.json.provider import DefaultJSONProvider
+from decimal import Decimal
 from functools import wraps
 from database import get_db, get_cursor
 from config import SECRET_KEY, FLASK_ENV, SERVER_HOST, SERVER_PORT
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
+
+
+class _JSONProvider(DefaultJSONProvider):
+    """Send Decimal to the browser as a JSON number, not a string.
+
+    The finance money/rate/quantity columns are numeric (migration jnpa71 —
+    float4 could not hold a rupee amount to the paisa), so psycopg2 hands them
+    back as Decimal. Flask's default provider serialises Decimal as a *string*,
+    which silently changed every amount on the wire from 174.46 to "174.46" and
+    broke every `(x || 0).toFixed(2)` in the templates.
+
+    float is the right wire type here: it is what these fields were before the
+    migration, and float64 is exact well past any rupee figure. The exactness
+    that matters — storage and server-side arithmetic — stays in numeric.
+    """
+
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return float(o)
+        return super().default(o)
+
+
+app.json = _JSONProvider(app)
 
 
 @app.template_filter('indian_number')

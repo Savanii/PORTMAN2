@@ -65,10 +65,18 @@
             }
         ];
         if (k === 'invoice') {
+            // Text, not number: a number editor drops the leading zero before
+            // the value ever leaves the browser, and that zero is the whole
+            // point — "0418" numbers invoices as 0418, "418" as 418.
             columns.push({title: "Start At", field: "start_seq", width: 110, hozAlign: "right",
-                editor: canEdit ? "number" : false,
-                editorParams: {min: 1, step: 1},
-                formatter: cell => cell.getValue() == null ? '<span style="color:#a0aec0;">—</span>' : cell.getValue()
+                editor: canEdit ? "input" : false,
+                editorParams: {elementAttributes: {inputmode: "numeric", pattern: "[0-9]*"}},
+                formatter: function(cell) {
+                    const v = cell.getValue();
+                    if (v == null || v === '') return '<span style="color:#a0aec0;">—</span>';
+                    const w = cell.getRow().getData().seq_width;
+                    return w ? String(v).padStart(w, '0') : v;
+                }
             });
         }
         columns.push({title: "Default", field: "is_default", hozAlign: "center", width: 80, headerSort: false,
