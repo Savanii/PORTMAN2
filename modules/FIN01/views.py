@@ -281,6 +281,10 @@ def save_bill():
             data['source_display'] = row['vcn_doc_num'] if row else ''
         conn.close()
 
+    sap_err = model.sap_customer_code_error(data.get('customer_type'), data.get('customer_id'))
+    if sap_err:
+        return jsonify({'success': False, 'error': sap_err})
+
     # Extract fields not in bill_header table before saving
     customer_state_code = data.pop('customer_state_code', '') or ''
 
@@ -338,6 +342,12 @@ def bill_generate():
         return jsonify({'success': False, 'error': 'No lines selected'})
     if any(float(l.get('rate') or 0) <= 0 for l in lines):
         return jsonify({'success': False, 'error': 'Every selected line needs a rate greater than 0'})
+
+    # The bill is what SAP eventually posts, and its Customer_Code comes from
+    # the master. Refuse here rather than let a codeless invoice reach SAP.
+    sap_err = model.sap_customer_code_error(data.get('customer_type'), data.get('customer_id'))
+    if sap_err:
+        return jsonify({'success': False, 'error': sap_err})
 
     vcn_ids = sorted({l.get('vcn_id') for l in lines if l.get('vcn_id')})
     unclosed = model.unclosed_vcn_docs(vcn_ids)
@@ -1077,7 +1087,11 @@ def get_customer_billables(customer_type, customer_id):
     """Billables for a customer, grouped by vessel (see FIN01/model)."""
     if 'user_id' not in session:
         return jsonify({'error': 'Not logged in'}), 401
-    return jsonify(model.get_customer_billables(customer_type, customer_id))
+    data = model.get_customer_billables(customer_type, customer_id)
+    # Warn as soon as the party is loaded rather than after they have picked
+    # every line — bill/generate refuses on the same check.
+    data['sap_code_error'] = model.sap_customer_code_error(customer_type, customer_id)
+    return jsonify(data)
 
 
 @bp.route('/api/module/FIN01/service-records/<customer_type>/<int:customer_id>')

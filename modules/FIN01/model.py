@@ -725,6 +725,53 @@ def vcn_billing_blockers(vcn_id):
     }
 
 
+# ===== SAP CUSTOMER CODE GUARD =====
+
+# customer_type -> (master table, the module that maintains it). The tables
+# match sap_builder._CUSTOMER_TABLE_MAP; the module names are what the billing
+# screen tells the user to go and fix.
+_SAP_CODE_MASTERS = {
+    'Customer': ('vessel_customers', 'VCUM01 (Vessel Customer Master)'),
+    'Agent': ('vessel_agents', 'VAM01 (Vessel Agent Master)'),
+    'ImporterExporter': ('vessel_importer_exporters', 'VIEM01 (Importer / Exporter Master)'),
+}
+
+
+def sap_customer_code_error(customer_type, customer_id, cur=None):
+    """None when the party can be billed, else why not.
+
+    The SAP payload's Customer_Code comes from the master's sap_customer_code
+    (sap_builder._get_customer_sap_info). Bills raised from the billables
+    screen carry no customer_gl_code, so when the master field is blank the
+    fallback is blank too and the document posts to SAP with no customer on
+    it. Cheaper to refuse at billing time than to chase it afterwards.
+    """
+    master = _SAP_CODE_MASTERS.get(customer_type)
+    if not master:
+        return f'Unknown customer type "{customer_type}" — cannot resolve its SAP code.'
+    table, module = master
+    if not customer_id:
+        return 'No customer selected.'
+
+    conn = None if cur is not None else get_db()
+    if conn is not None:
+        cur = get_cursor(conn)
+    try:
+        cur.execute(f'SELECT name, sap_customer_code FROM {table} WHERE id = %s', [customer_id])
+        row = cur.fetchone()
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if not row:
+        return 'That customer no longer exists in the master.'
+    if (row['sap_customer_code'] or '').strip():
+        return None
+    return (f"SAP customer code is not set for {row['name']}. "
+            f"Add it in {module} before billing — without it the invoice "
+            f"would post to SAP with no customer code.")
+
+
 def generate_bill(data, created_by, bill_status, approved_by=None):
     """Create ONE bill across the selected vessels. Reuses save_bill_header
     (numbering) and save_bill_line (GST/TDS calc, mutates the line dict with the

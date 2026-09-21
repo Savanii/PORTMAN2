@@ -452,14 +452,14 @@
 
         <h4 style="font-size:12px;margin:12px 0 6px;">Unbilled / partly billed</h4>
         <table class="data-table" style="width:100%;font-size:11px;">
-            <thead><tr><th style="width:28px;"></th><th>Vessel</th><th>Parcel</th><th>Cargo</th><th>Declared</th><th>Billed</th><th style="width:110px;">Flag quantity</th></tr></thead>
+            <thead><tr><th style="width:28px;"><input type="checkbox" id="cutAllOpen" title="Select all" onclick="cutToggleAll(this, '.cut-open')"></th><th>Vessel</th><th>Parcel</th><th>Cargo</th><th>Declared</th><th>Billed</th><th style="width:110px;">Flag quantity</th></tr></thead>
             <tbody id="cutoverCargoRows"><tr><td colspan="7" style="color:#718096;">Select a party.</td></tr></tbody>
         </table>
         <button class="btn btn-save" style="margin-top:8px;" onclick="cutoverMark('mark')">Mark selected as billed</button>
 
         <h4 style="font-size:12px;margin:18px 0 6px;">Cutover-flagged (no bill) — reopen to make billable again</h4>
         <table class="data-table" style="width:100%;font-size:11px;">
-            <thead><tr><th style="width:28px;"></th><th>Vessel</th><th>Parcel</th><th>Cargo</th><th>Declared</th><th>Flagged</th></tr></thead>
+            <thead><tr><th style="width:28px;"><input type="checkbox" id="cutAllFlagged" title="Select all" onclick="cutToggleAll(this, '.cut-flagged')"></th><th>Vessel</th><th>Parcel</th><th>Cargo</th><th>Declared</th><th>Flagged</th></tr></thead>
             <tbody id="cutoverFlaggedRows"><tr><td colspan="6" style="color:#718096;">Select a party.</td></tr></tbody>
         </table>
         <button class="btn btn-danger" style="margin-top:8px;" onclick="cutoverMark('unmark')">Reopen selected</button>
@@ -471,7 +471,7 @@
             A record held by a real PORTMAN2 bill is shown but cannot be changed.
         </p>
         <table class="data-table" style="width:100%;font-size:11px;">
-            <thead><tr><th style="width:28px;"></th><th>Record</th><th>Date</th><th>Service</th><th>Reference</th><th>Quantity</th><th>State</th></tr></thead>
+            <thead><tr><th style="width:28px;"><input type="checkbox" id="cutAllSvc" title="Select all" onclick="cutToggleAll(this, '.cut-svc')"></th><th>Record</th><th>Date</th><th>Service</th><th>Reference</th><th>Quantity</th><th>State</th></tr></thead>
             <tbody id="cutoverServiceRows"><tr><td colspan="7" style="color:#718096;">Select a party.</td></tr></tbody>
         </table>
         <button class="btn btn-save" style="margin-top:8px;" onclick="cutoverMarkServices('mark')">Mark selected as billed</button>
@@ -882,6 +882,7 @@ async function loadCutoverParty() {
     const open = document.getElementById('cutoverCargoRows');
     const flagged = document.getElementById('cutoverFlaggedRows');
     const svc = document.getElementById('cutoverServiceRows');
+    cutResetAll();
     if (!name) {
         open.innerHTML = '<tr><td colspan="7" style="color:#718096;">Select a party.</td></tr>';
         flagged.innerHTML = '<tr><td colspan="6" style="color:#718096;">Select a party.</td></tr>';
@@ -893,6 +894,23 @@ async function loadCutoverParty() {
     const d = await res.json();
     renderCutoverCargo(d.cargo || []);
     renderCutoverServices(d.services || []);
+}
+
+// Header checkbox -> every row box in that table. The services table holds
+// open and already-flagged records together, but cutoverMarkServices filters
+// on data-flagged, so "select all" there still marks only the open ones and
+// reopens only the flagged ones.
+function cutToggleAll(box, cls) {
+    document.querySelectorAll(cls).forEach(b => { b.checked = box.checked; });
+}
+
+// A re-render replaces the rows but not the header, so an inherited tick would
+// claim a selection that no longer exists.
+function cutResetAll() {
+    ['cutAllOpen', 'cutAllFlagged', 'cutAllSvc'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.checked = false;
+    });
 }
 
 function renderCutoverCargo(cargo) {

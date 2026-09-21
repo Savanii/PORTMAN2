@@ -142,6 +142,9 @@
 
 <!-- Billables area (loaded after customer selection) -->
 <div id="billablesArea" style="display:none;">
+<div id="sapCodeWarn"
+     style="display:none;border:1px solid #c05621;background:#fffaf0;color:#7b341e;
+            padding:10px 12px;border-radius:4px;font-size:13px;margin-bottom:12px;"></div>
 
     <!-- Vessel-grouped billable charges -->
     <div class="form-section">
@@ -295,6 +298,10 @@ async function loadBillables() {
     try {
         const resp = await fetch(`/api/module/FIN01/customer-billables/${ct}/${cid}`);
         billableData = await resp.json();
+
+        const warn = document.getElementById('sapCodeWarn');
+        warn.textContent = billableData.sap_code_error || '';
+        warn.style.display = billableData.sap_code_error ? 'block' : 'none';
 
         renderVessels(billableData.vessels || []);
         renderServices(billableData.services || []);
@@ -611,6 +618,11 @@ function generateBill() {
         return;
     }
 
+    if (billableData && billableData.sap_code_error) {
+        alert(billableData.sap_code_error);
+        return;
+    }
+
     const ct = document.getElementById('customerType').value;
     const cidSel = document.getElementById('customerId');
     const cid = cidSel.value;
@@ -629,9 +641,7 @@ function generateBill() {
 async function confirmGenerateBill() {
     // The bill is born Approved and locked, so it is worth one confirm — but
     // no password: the session already proves who is clicking.
-    if (!confirm('Generate the final bill on actual handled quantities?
-
-'
+    if (!confirm('Generate the final bill on actual handled quantities?\n\n'
                + 'It is created as Approved and locked — it cannot be reverted '
                + 'to draft or deleted.')) return;
     const res = await fetch('/api/module/FIN01/bill/generate', {
