@@ -994,10 +994,14 @@ def _cutover_error(fn, *args, **kwargs):
 def cutover_state():
     from . import cutover
     customer_name = (request.args.get('customer_name') or '').strip()
+    customer_type = (request.args.get('customer_type') or '').strip()
+    customer_id = (request.args.get('customer_id') or '').strip()
     return jsonify({
         'locked': cutover.is_locked(),
         'seeds': cutover.get_seeds(),
         'cargo': cutover.get_cargo(customer_name) if customer_name else [],
+        'services': (cutover.get_services(customer_type, customer_id)
+                     if customer_type and customer_id else []),
     })
 
 
@@ -1039,6 +1043,19 @@ def cutover_mark_billed():
         return jsonify({'success': False, 'error': 'No cargo selected'}), 400
     fn = cutover.unmark_items_billed if d.get('action') == 'unmark' else cutover.mark_items_billed
     return _cutover_error(fn, items, session.get('username'))
+
+
+@bp.route('/api/cutover/mark-services', methods=['POST'])
+@admin_required
+def cutover_mark_services():
+    from . import cutover
+    d = request.json or {}
+    ids = d.get('service_ids') or []
+    if not ids:
+        return jsonify({'success': False, 'error': 'No services selected'}), 400
+    fn = (cutover.unmark_services_billed if d.get('action') == 'unmark'
+          else cutover.mark_services_billed)
+    return _cutover_error(fn, ids, session.get('username'))
 
 
 @bp.route('/api/cutover/lock', methods=['POST'])

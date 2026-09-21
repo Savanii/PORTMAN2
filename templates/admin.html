@@ -444,7 +444,7 @@
                 </select>
             </label>
             <label style="font-size:11px;flex:1;min-width:240px;">Party<br>
-                <select id="cutCustomer" onchange="loadCutoverCargo()" style="width:100%;padding:6px;">
+                <select id="cutCustomer" onchange="loadCutoverParty()" style="width:100%;padding:6px;">
                     <option value="">-- Select --</option>
                 </select>
             </label>
@@ -463,6 +463,19 @@
             <tbody id="cutoverFlaggedRows"><tr><td colspan="6" style="color:#718096;">Select a party.</td></tr></tbody>
         </table>
         <button class="btn btn-danger" style="margin-top:8px;" onclick="cutoverMark('unmark')">Reopen selected</button>
+
+        <h4 style="font-size:12px;margin:22px 0 6px;">Legacy-billed services</h4>
+        <p style="font-size:11px;color:#718096;margin:0 0 8px;">
+            PORTMAN2 bills service records (SRV01 / SRV02) as well as cargo, so
+            anything the legacy system already invoiced has to be flagged here too.
+            A record held by a real PORTMAN2 bill is shown but cannot be changed.
+        </p>
+        <table class="data-table" style="width:100%;font-size:11px;">
+            <thead><tr><th style="width:28px;"></th><th>Record</th><th>Date</th><th>Service</th><th>Reference</th><th>Quantity</th><th>State</th></tr></thead>
+            <tbody id="cutoverServiceRows"><tr><td colspan="7" style="color:#718096;">Select a party.</td></tr></tbody>
+        </table>
+        <button class="btn btn-save" style="margin-top:8px;" onclick="cutoverMarkServices('mark')">Mark selected as billed</button>
+        <button class="btn btn-danger" style="margin-top:8px;" onclick="cutoverMarkServices('unmark')">Reopen selected</button>
     </div>
 
     <div class="admin-section" style="margin-top:14px;">
@@ -841,22 +854,39 @@ async function loadCutoverCustomers() {
     const res = await fetch(`/api/module/FIN01/customers/${ct}`);
     const d = await res.json();
     sel.innerHTML = '<option value="">-- Select --</option>' +
-        (d.data || []).map(c => `<option value="${c.name}">${c.name}</option>`).join('');
-    loadCutoverCargo();
+        (d.data || []).map(c => `<option value="${c.name}" data-id="${c.id}">${c.name}</option>`).join('');
+    loadCutoverParty();
 }
 
-async function loadCutoverCargo() {
-    const name = document.getElementById('cutCustomer').value;
+// Cargo is looked up by party NAME (that is what a parcel's importer_name
+// holds); service records are looked up by type + id. One fetch serves both.
+async function loadCutoverParty() {
+    const sel = document.getElementById('cutCustomer');
+    const name = sel.value;
+    const opt = sel.selectedOptions && sel.selectedOptions[0];
+    const ct = document.getElementById('cutCustType').value;
+    const cid = opt ? (opt.dataset.id || '') : '';
+
     const open = document.getElementById('cutoverCargoRows');
     const flagged = document.getElementById('cutoverFlaggedRows');
+    const svc = document.getElementById('cutoverServiceRows');
     if (!name) {
         open.innerHTML = '<tr><td colspan="7" style="color:#718096;">Select a party.</td></tr>';
         flagged.innerHTML = '<tr><td colspan="6" style="color:#718096;">Select a party.</td></tr>';
+        svc.innerHTML = '<tr><td colspan="7" style="color:#718096;">Select a party.</td></tr>';
         return;
     }
-    const res = await fetch('/admin/api/cutover/state?customer_name=' + encodeURIComponent(name));
+    const qs = new URLSearchParams({customer_name: name, customer_type: ct, customer_id: cid});
+    const res = await fetch('/admin/api/cutover/state?' + qs);
     const d = await res.json();
-    _cutoverCargo = d.cargo || [];
+    renderCutoverCargo(d.cargo || []);
+    renderCutoverServices(d.services || []);
+}
+
+function renderCutoverCargo(cargo) {
+    _cutoverCargo = cargo;
+    const open = document.getElementById('cutoverCargoRows');
+    const flagged = document.getElementById('cutoverFlaggedRows');
 
     const key = c => `${c.cargo_source_type}:${c.id}`;
     const openRows = _cutoverCargo.filter(c => !c.cutover_flagged);
@@ -879,6 +909,31 @@ async function loadCutoverCargo() {
         <td>${Number(c.quantity || 0).toFixed(3)}</td>
         <td>${Number(c.billed || 0).toFixed(3)}</td></tr>`).join('')
         : '<tr><td colspan="6" style="color:#718096;">No cutover-flagged cargo for this party.</td></tr>';
+}
+
+function renderCutoverServices(services) {
+    const body = document.getElementById('cutoverServiceRows');
+    if (!services.length) {
+        body.innerHTML = '<tr><td colspan="7" style="color:#718096;">No approved service records for this party.</td></tr>';
+        return;
+    }
+    body.innerHTML = services.map(s => {
+        const state = s.locked_by_bill
+            ? `Billed on bill #${s.bill_id}`
+            : (s.cutover_flagged ? 'Cutover-flagged' : 'Open');
+        // A record a real bill owns is listed for context only — flagging or
+        // reopening it would orphan that bill's line.
+        const box = s.locked_by_bill ? ''
+            : `<input type="checkbox" class="cut-svc" value="${s.id}" data-flagged="${s.cutover_flagged ? 1 : 0}">`;
+        return `<tr>
+            <td>${box}</td>
+            <td>${s.record_number || ''}</td>
+            <td>${(s.record_date || '').slice(0, 10)}</td>
+            <td>${s.service_name || s.service_code || ''}</td>
+            <td>${s.ref_source_display || ''}</td>
+            <td>${Number(s.billable_quantity || 0).toFixed(3)} ${s.billable_uom || ''}</td>
+            <td>${state}</td></tr>`;
+    }).join('');
 }
 
 async function cutoverMark(action) {
@@ -905,7 +960,31 @@ async function cutoverMark(action) {
     cutoverStatus(d.success
         ? `${action === 'unmark' ? 'Reopened' : 'Flagged'} ${items.length} parcel(s).`
         : d.error, d.success);
-    if (d.success) loadCutoverCargo();
+    if (d.success) loadCutoverParty();
+}
+
+async function cutoverMarkServices(action) {
+    const want = action === 'unmark' ? '1' : '0';
+    const boxes = Array.from(document.querySelectorAll('.cut-svc:checked'))
+                       .filter(b => b.dataset.flagged === want);
+    if (!boxes.length) {
+        cutoverStatus(action === 'unmark'
+            ? 'Select at least one cutover-flagged service.'
+            : 'Select at least one open service.', false);
+        return;
+    }
+    const question = action === 'unmark'
+        ? 'Reopen these service records? They become billable in FIN01 again.'
+        : 'Flag these service records as already billed in the legacy system?';
+    if (!confirm(question)) return;
+    const res = await fetch('/admin/api/cutover/mark-services', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action, service_ids: boxes.map(b => parseInt(b.value))})});
+    const d = await res.json();
+    cutoverStatus(d.success
+        ? `${action === 'unmark' ? 'Reopened' : 'Flagged'} ${(d.result || []).length} service record(s).`
+        : d.error, d.success);
+    if (d.success) loadCutoverParty();
 }
 
 async function toggleCutoverLock() {

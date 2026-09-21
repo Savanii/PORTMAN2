@@ -140,6 +140,7 @@
         }
         .qr-area { text-align: right; }
         .qr-area img { width: 100px; height: 100px; }
+        .qr-canvas canvas { width: 100px !important; height: 100px !important; display: block; margin-left: auto; }
         .qr-placeholder {
             width: 100px; height: 100px;
             border: 1px dashed #999;
@@ -428,9 +429,6 @@
 {% set rnd_off = invoice.round_off|float if invoice.round_off else 0 %}
 {% set tds_a   = invoice.tds_amount|float if invoice.tds_amount else 0 %}
 {% set tcs_a   = invoice.tcs_amount|float if invoice.tcs_amount else 0 %}
-{% set cgst_pct = ((cgst_a / sub * 100) if sub > 0 else 0)|round(0)|int %}
-{% set sgst_pct = ((sgst_a / sub * 100) if sub > 0 else 0)|round(0)|int %}
-{% set igst_pct = ((igst_a / sub * 100) if sub > 0 else 0)|round(0)|int %}
 
 <div class="invoice-set">
 <div class="invoice-copy">
@@ -462,12 +460,14 @@
             <div class="rule-text">TAX INVOICE ISSUED UNDER RULE<br>46 OF CGST RULES 2017</div>
             <div class="qr-area">
                 {% if invoice.gst_qr_code %}
-                {# ponytail: SAP sends the QR either as a data: URI or as raw
-                   base64 image bytes — prefix the latter rather than pull in a
-                   QR encoder. onerror falls back to the placeholder. #}
-                <img src="{{ invoice.gst_qr_code if invoice.gst_qr_code.startswith('data:') else 'data:image/png;base64,' ~ invoice.gst_qr_code }}"
-                     alt="QR Code"
-                     onerror="this.outerHTML='&lt;div class=\'qr-placeholder\'&gt;QR Code&lt;br&gt;unavailable&lt;/div&gt;'">
+                    {# The IRP returns the signed QR as a JWT *string*, not an
+                       image, so it has to be encoded client-side. Only a
+                       data:/http value is already a picture. #}
+                    {% if invoice.gst_qr_code.startswith('http') or invoice.gst_qr_code.startswith('data:') %}
+                    <img src="{{ invoice.gst_qr_code }}" alt="QR Code">
+                    {% else %}
+                    <div class="qr-canvas"></div>
+                    {% endif %}
                 {% else %}
                 <div class="qr-placeholder">QR Code<br>(after IRN)</div>
                 {% endif %}
@@ -547,11 +547,12 @@
 
     <!-- ══ 7. Line Items ══ -->
     {#
-        display_lines is pre-processed by the view:
-          - non-cargo lines pass through unchanged
-          - cargo handling lines (CHGL01/CHGU01) are grouped by rate;
-            one row per distinct rate with summed qty + amount.
-        invoice_lines (raw) is still used for SAC summary and cargo appendix.
+        display_lines is pre-processed by the view (_build_display_lines),
+        structured like the pro forma: a cargo service becomes a heading row
+        carrying no figures, with one indented row per cargo underneath; a
+        service charge stays a single row. Only rows with figures count toward
+        the Sub Total. invoice_lines (raw) still feeds the SAC summary and the
+        cargo appendix.
     #}
     <div class="items-section">
         <table class="items-table">
@@ -566,15 +567,29 @@
                 </tr>
             </thead>
             <tbody>
+                {% set ns = namespace(sl=0) %}
                 {% for line in display_lines %}
+                {% if line.is_heading %}
+                {% set ns.sl = ns.sl + 1 %}
                 <tr>
-                    <td style="text-align:center;">{{ loop.index }}</td>
-                    <td>{{ line.service_name }}</td>
+                    <td style="text-align:center;">{{ ns.sl }}</td>
+                    <td style="font-weight:700;">{{ line.service_name }}</td>
+                    <td>{{ line.sac_code or '—' }}</td>
+                    <td class="num"></td>
+                    <td class="num"></td>
+                    <td class="num"></td>
+                </tr>
+                {% else %}
+                {% if not line.indent %}{% set ns.sl = ns.sl + 1 %}{% endif %}
+                <tr>
+                    <td style="text-align:center;">{{ '' if line.indent else ns.sl }}</td>
+                    <td{% if line.indent %} style="padding-left:20px;"{% endif %}>{{ line.service_name }}</td>
                     <td>{{ line.sac_code or '—' }}</td>
                     <td class="num">{{ "%.2f"|format(line.quantity|float) }}</td>
-                    <td class="num">{{ line.rate|indian_number }}</td>
-                    <td class="num">{{ line.line_amount|indian_number }}</td>
+                    <td class="num">{{ line.rate|float|indian_number }}</td>
+                    <td class="num">{{ line.line_amount|float|indian_number }}</td>
                 </tr>
+                {% endif %}
                 {% endfor %}
             </tbody>
             <tfoot>
@@ -621,18 +636,21 @@
         </div>
         <div class="totals-col">
             <table class="totals-table">
+                {# One row per GST rate actually charged (_gst_rate_lines).
+                   A single back-computed percentage printed a blended rate on
+                   any invoice mixing 18% cargo handling with 0%-rated toll. #}
+                {% for g in gst_lines %}
                 <tr>
-                    <td>CGST {{ cgst_pct }}%</td>
-                    <td>{{ cgst_a|indian_number }}</td>
+                    <td>{{ g.label }}</td>
+                    <td>{{ g.amount|float|indian_number }}</td>
                 </tr>
+                {% endfor %}
+                {% if not gst_lines %}
                 <tr>
-                    <td>SGST {{ sgst_pct }}%</td>
-                    <td>{{ sgst_a|indian_number }}</td>
+                    <td>GST</td>
+                    <td>0.00</td>
                 </tr>
-                <tr>
-                    <td>IGST {{ igst_pct }}%</td>
-                    <td>{{ igst_a|indian_number }}</td>
-                </tr>
+                {% endif %}
                 {% if tds_a > 0 %}
                 <tr>
                     <td>TDS Deducted</td>
@@ -741,6 +759,7 @@
             <tr>
                 <th>Sr</th>
                 <th>M.Vessel Name</th>
+                <th>Parcel</th>
                 <th>Consignee</th>
                 <th>Cargo</th>
                 <th>Quantity (MT)</th>
@@ -754,6 +773,7 @@
             <tr>
                 <td style="text-align:center;">{{ loop.index }}</td>
                 <td>{{ cd.vessel_name }}</td>
+                <td>{{ cd.parcel_no }}</td>
                 <td>{{ cd.consignee }}</td>
                 <td>{{ cd.cargo }}</td>
                 <td class="num">{{ "%.2f"|format(cd.quantity) }}</td>
@@ -765,7 +785,7 @@
         </tbody>
         <tfoot>
             <tr class="total-row">
-                <td colspan="4" style="text-align:right;">Total</td>
+                <td colspan="5" style="text-align:right;">Total</td>
                 <td class="num">{{ "%.2f"|format(cargo_details|sum(attribute='quantity')) }}</td>
                 <td colspan="3"></td>
             </tr>
@@ -784,5 +804,21 @@
 {{ render_copy("TRIPLICATE FOR TRANSPORTER") }}
 {% endif %}
 
+{% if invoice.gst_qr_code and not (invoice.gst_qr_code.startswith('http') or invoice.gst_qr_code.startswith('data:')) %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+document.querySelectorAll('.qr-canvas').forEach(function(el) {
+    new QRCode(el, {
+        text: {{ invoice.gst_qr_code | tojson }},
+        width: 256,
+        height: 256,
+        correctLevel: QRCode.CorrectLevel.M
+    });
+    // Use the canvas (high-res); hide the low-res img copy qrcodejs also makes
+    var img = el.querySelector('img');
+    if (img) img.style.display = 'none';
+});
+</script>
+{% endif %}
 </body>
 </html>

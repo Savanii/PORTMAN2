@@ -623,33 +623,25 @@ function generateBill() {
         customer_gl_code: '',
         lines: picked,
     };
-    // final bill is born Approved — the user re-authenticates to sign it off
-    document.getElementById('pwdInput').value = '';
-    document.getElementById('pwdError').textContent = '';
-    document.getElementById('pwdModal').style.display = 'flex';
-    document.getElementById('pwdInput').focus();
+    confirmGenerateBill();
 }
 
 async function confirmGenerateBill() {
-    const pwd = document.getElementById('pwdInput').value;
-    const errEl = document.getElementById('pwdError');
-    if (!pwd) { errEl.textContent = 'Enter your password.'; return; }
-    const payload = { ...window._pendingBill, password: pwd };
-    const btn = document.getElementById('pwdConfirmBtn');
-    btn.disabled = true; btn.textContent = 'Generating…';
-    try {
-        const res = await fetch('/api/module/FIN01/bill/generate', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload),
-        });
-        const j = await res.json();
-        if (!j.success) { errEl.textContent = j.error || 'Bill generation failed'; return; }
-        document.getElementById('pwdModal').style.display = 'none';
-        alert('Bill ' + j.bill_number + ' generated and APPROVED. It is now locked (no draft/delete).');
-        loadBillables();   // reload; billed lines drop out via ledger remaining
-    } finally {
-        btn.disabled = false; btn.textContent = '✓ Confirm & Generate';
-    }
+    // The bill is born Approved and locked, so it is worth one confirm — but
+    // no password: the session already proves who is clicking.
+    if (!confirm('Generate the final bill on actual handled quantities?
+
+'
+               + 'It is created as Approved and locked — it cannot be reverted '
+               + 'to draft or deleted.')) return;
+    const res = await fetch('/api/module/FIN01/bill/generate', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(window._pendingBill),
+    });
+    const j = await res.json();
+    if (!j.success) { alert(j.error || 'Bill generation failed'); return; }
+    alert('Bill ' + j.bill_number + ' generated and APPROVED. It is now locked (no draft/delete).');
+    loadBillables();   // reload; billed lines drop out via ledger remaining
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -682,28 +674,6 @@ async function viewProofDocs(sourceModule, sourceId) {
     `).join('');
 }
 </script>
-
-<!-- Password confirmation modal — actual bill is approved on generation -->
-<div id="pwdModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99999;align-items:center;justify-content:center;">
-    <div style="background:white;border-radius:8px;padding:24px;max-width:420px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,0.3);">
-        <h3 style="margin:0 0 8px;font-size:16px;font-weight:600;">🔒 Confirm Bill Generation</h3>
-        <p style="font-size:12px;color:#4a5568;margin:0 0 14px;">
-            You are generating the <b>final bill on actual handled quantities</b>.
-            It will be created as <b>Approved</b> and locked — it cannot be reverted
-            to draft or deleted. Enter your password to confirm.
-        </p>
-        <input type="password" id="pwdInput" placeholder="Your login password" autocomplete="current-password"
-               style="width:100%;box-sizing:border-box;padding:8px;font-size:13px;border:1px solid #cbd5e0;border-radius:4px;"
-               onkeydown="if(event.key==='Enter')confirmGenerateBill()">
-        <div id="pwdError" style="color:#e53e3e;font-size:12px;min-height:16px;margin-top:6px;"></div>
-        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
-            <button onclick="document.getElementById('pwdModal').style.display='none'"
-                    style="padding:8px 16px;background:#e2e8f0;border:none;border-radius:4px;cursor:pointer;font-size:13px;">Cancel</button>
-            <button id="pwdConfirmBtn" onclick="confirmGenerateBill()"
-                    style="padding:8px 18px;background:#27ae60;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">✓ Confirm &amp; Generate</button>
-        </div>
-    </div>
-</div>
 
 <!-- Proof Docs Viewer Modal -->
 <div id="proofDocsModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99999;align-items:center;justify-content:center;">

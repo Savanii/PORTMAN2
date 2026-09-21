@@ -140,12 +140,17 @@ def get_callback_logs(page=1, size=50):
 
 def get_outbound_logs(page=1, size=50, type_filter=None):
     """Outbound integration calls (SAP posts, GST/IRP calls) — everything that
-    is not an inbound callback. `type_filter` matches integration_type."""
+    is not an inbound callback.
+
+    `type_filter` is a family prefix, not an exact integration_type: the GST
+    calls are logged as GST_IRN and GST_IRN_CANCEL, so the console's "GST"
+    option has to match both. An exact match returned nothing for GST.
+    """
     where = "integration_type <> 'SAP_INBOUND'"
     params = []
     if type_filter:
-        where += ' AND integration_type = %s'
-        params.append(type_filter)
+        where += ' AND integration_type LIKE %s'
+        params.append(type_filter + '%')
     conn = get_db()
     cur = get_cursor(conn)
     cur.execute(f'SELECT COUNT(*) AS cnt FROM integration_logs WHERE {where}', params)
@@ -294,10 +299,6 @@ def push_invoice_to_staging(invoice_id, pushed_by=None):
     for idx, line in enumerate(lines):
         gl_account   = line.get('sap_gl_account') or line.get('gl_code') or ''
         profit_center = line.get('sap_profit_center') or line.get('profit_center') or cfg.get('profit_center') or ''
-        tax_code      = line.get('sap_tax_code') or line.get('fst_tax_code') or cfg.get('tax_code') or ''
-        igst_gl       = line.get('sap_igst_gl') or ''
-        cgst_gl       = line.get('sap_cgst_gl') or ''
-        sgst_gl       = line.get('sap_sgst_gl') or ''
         tds_gl        = line.get('sap_tds_gl')  or tds_gl_default
         tcs_gl        = line.get('sap_tcs_gl')  or tcs_gl_default
         hsn_sac       = (line.get('sac_code') or line.get('hsn_sac') or '')[:16]
@@ -308,9 +309,24 @@ def push_invoice_to_staging(invoice_id, pushed_by=None):
         tds_amt  = float(line.get('tds_amount')  or 0)
         tcs_amt  = float(line.get('tcs_amount')  or 0)
 
-        # Round-off only on the last line.
-        # DR: round-off GL is in the "rest" (Credit) group — negate so SAP posts CR under + = Debit convention.
-        rnd_val = -round_off if idx == len(lines) - 1 else 0.0
+        # Tax_Code is empty when no GST applies on the line (TC-09 spec).
+        # Otherwise pick by transaction type.
+        if igst_amt > 0:
+            tax_code = cfg.get('igst_tax_code') or cfg.get('tax_code') or ''
+        elif (cgst_amt + sgst_amt) > 0:
+            tax_code = cfg.get('cgst_tax_code') or cfg.get('tax_code') or ''
+        else:
+            tax_code = ''
+
+        # GST GLs only when ANY GST applies on this line (all 3 sent together).
+        any_gst = (igst_amt + cgst_amt + sgst_amt) > 0
+        igst_gl = (line.get('sap_igst_gl') or '') if any_gst else ''
+        cgst_gl = (line.get('sap_cgst_gl') or '') if any_gst else ''
+        sgst_gl = (line.get('sap_sgst_gl') or '') if any_gst else ''
+
+        # Round-off on the FIRST line, positive value — matches the
+        # SAP-validated payload (TC-04, DPPL/26-27/41 multi-line).
+        rnd_val = round_off if idx == 0 else 0.0
 
         cur.execute('''
             INSERT INTO invoice_sap_staging (

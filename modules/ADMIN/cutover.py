@@ -5,11 +5,12 @@ Three jobs, all admin-only and all frozen once the cutover is locked:
   1. **Numbering seeds** — tell PORTMAN2 where the legacy system stopped, so
      the first invoice / bill / credit note it issues continues that run. A
      seed is a floor, never an assignment (see FIN01.next_from_seed).
-  2. **Flagging legacy-billed cargo** — mark parcels the legacy system already
-     invoiced so PORTMAN2 never bills them again. The flag is a
-     `parcel_charge_billed` row with `bill_id` NULL: billed, with no bill
-     behind it. Unmarking deletes exactly those NULL rows, so it can never
-     touch a genuine bill's ledger entry.
+  2. **Flagging legacy-billed work** — mark the cargo parcels *and* the service
+     records the legacy system already invoiced, so PORTMAN2 never bills them
+     again. Both flags say the same thing: billed, with no bill behind it — a
+     `parcel_charge_billed` row with `bill_id` NULL for a parcel, and
+     `is_billed=1, bill_id NULL` on a service record. Unmarking touches only
+     those bill-less rows, so it can never disturb a genuine bill.
   3. **The lock** — once go-live data is final, freeze every write here.
 
 Because the ledger is what `is_vcn_billed()` reads, flagging a parcel also
@@ -301,6 +302,91 @@ def unmark_items_billed(items, performed_by):
         released.append({'cargo_source_type': src, 'cargo_source_id': cargo_id,
                          'rows': cur.rowcount})
     write_audit('unmark_billed', {'items': released}, performed_by, cur=cur)
+    conn.commit()
+    conn.close()
+    return released
+
+
+# ---------------------------------------------------------------------------
+# Legacy-billed services
+# ---------------------------------------------------------------------------
+# PORTMAN2 bills service records (SRV01/SRV02) alongside cargo, so the cutover
+# has to be able to flag those too — otherwise go-live re-bills every service
+# the legacy system already invoiced.
+#
+# A service record has no quantity ledger: FIN01 marks it billed by setting
+# is_billed=1 with the bill's id. The cutover flag is the same row with
+# bill_id NULL — billed, with no bill behind it, exactly as for a parcel. That
+# also makes unmarking safe: it only ever releases NULL-bill_id rows.
+
+
+def get_services(customer_type, customer_id):
+    """Approved service records for one party, with their cutover state."""
+    if not customer_type or not customer_id:
+        return []
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('''
+        SELECT sr.id, sr.record_number, sr.record_date, sr.billable_quantity,
+               sr.billable_uom, sr.ref_source_display, sr.is_billed, sr.bill_id,
+               st.service_code, st.service_name
+        FROM service_records sr
+        JOIN finance_service_types st ON st.id = sr.service_type_id
+        WHERE sr.source_type = %s AND sr.source_id = %s
+          AND sr.doc_status = 'Approved'
+        ORDER BY sr.id
+    ''', [customer_type, customer_id])
+    rows = []
+    for r in cur.fetchall():
+        r = dict(r)
+        r['cutover_flagged'] = bool(r['is_billed']) and r['bill_id'] is None
+        # A record held by a real bill is not this module's to touch.
+        r['locked_by_bill'] = bool(r['is_billed']) and r['bill_id'] is not None
+        rows.append(r)
+    conn.close()
+    return rows
+
+
+def mark_services_billed(service_ids, performed_by):
+    """Flag service records as billed in the legacy system.
+
+    Skips any record already held by a real bill — that is a genuine PORTMAN2
+    billing, and overwriting its bill_id would orphan the bill line.
+    """
+    _require_unlocked()
+    ids = [int(i) for i in (service_ids or []) if str(i).strip()]
+    if not ids:
+        return []
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('''UPDATE service_records SET is_billed = 1, bill_id = NULL
+                   WHERE id = ANY(%s) AND bill_id IS NULL
+                   RETURNING id, record_number''', [ids])
+    marked = [dict(r) for r in cur.fetchall()]
+    write_audit('mark_services_billed',
+                {'service_ids': [m['id'] for m in marked],
+                 'skipped': sorted(set(ids) - {m['id'] for m in marked})},
+                performed_by, cur=cur)
+    conn.commit()
+    conn.close()
+    return marked
+
+
+def unmark_services_billed(service_ids, performed_by):
+    """Release cutover flags on service records — only rows with no bill behind
+    them, so a real bill's record can never be reopened here."""
+    _require_unlocked()
+    ids = [int(i) for i in (service_ids or []) if str(i).strip()]
+    if not ids:
+        return []
+    conn = get_db()
+    cur = get_cursor(conn)
+    cur.execute('''UPDATE service_records SET is_billed = 0
+                   WHERE id = ANY(%s) AND is_billed = 1 AND bill_id IS NULL
+                   RETURNING id, record_number''', [ids])
+    released = [dict(r) for r in cur.fetchall()]
+    write_audit('unmark_services_billed',
+                {'service_ids': [r['id'] for r in released]}, performed_by, cur=cur)
     conn.commit()
     conn.close()
     return released

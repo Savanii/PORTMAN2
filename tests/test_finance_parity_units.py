@@ -69,19 +69,34 @@ def test_merge_keeps_different_gl_accounts_separate():
     assert [m['Amount'] for m in merged] == ['10000.00', '2000.00']
 
 
-def test_merge_fills_gst_gl_from_the_line_that_brought_the_amount():
-    """A zero-GST first line must not swallow the second line's GST GLs."""
+def test_merge_keeps_a_zero_gst_line_off_a_taxed_one():
+    """A zero-GST line and a taxed line stay two SAP lines even on one GL.
+
+    The GST GL is part of what identifies a posting, so it is part of the merge
+    key: folding a 0%-rated charge into a taxed one would post it under the
+    taxed line's GST GL and lose the distinction the return needs.
+    """
     merged = sap_builder._merge_same_gl_items([
         _item('4101076030', 10000),
         _item('4101076030', 5000, CGST_AMT='450.00', CGST_GL='2400001000'),
     ])
-    assert merged[0]['CGST_AMT'] == '450.00'
-    assert merged[0]['CGST_GL'] == '2400001000'
+    assert len(merged) == 2
+    assert merged[0]['CGST_AMT'] == '' and merged[0]['CGST_GL'] == ''
+    assert merged[1]['CGST_AMT'] == '450.00'
+    assert merged[1]['CGST_GL'] == '2400001000'
 
 
 # ── A2: Invoice_Amount rebuilt from components ───────────────────────────────
 
 def test_total_invoice_amount_is_built_from_components_not_total_amount():
+    """Invoice_Amount = taxable + GST + TCS + round-off.
+
+    TCS is collected *from* the customer, so it is part of what they owe and is
+    added. TDS does not move it at all: the customer is invoiced gross and
+    withholds at payment time. Both match einvoice_builder's TotInvVal, which
+    the IRP validates against the same figure. See test_sap_invoice_amount for
+    the production documents that pinned this down.
+    """
     header = {
         'subtotal': 10000, 'cgst_amount': 900, 'sgst_amount': 900, 'igst_amount': 0,
         'tds_amount': 200, 'tcs_amount': 118, 'round_off': 0.18,
@@ -89,7 +104,7 @@ def test_total_invoice_amount_is_built_from_components_not_total_amount():
         'total_amount': 999999,
     }
     total = sap_builder._total_invoice_amount(header, [])
-    assert round(total, 2) == round(10000 + 900 + 900 + 200 - 118 + 0.18, 2)
+    assert round(total, 2) == round(10000 + 900 + 900 + 118 + 0.18, 2)
 
 
 def test_total_invoice_amount_falls_back_to_the_lines():
@@ -98,7 +113,7 @@ def test_total_invoice_amount_falls_back_to_the_lines():
         {'line_amount': 4000, 'cgst_amount': 360, 'sgst_amount': 360, 'tcs_amount': 40},
     ]
     total = sap_builder._total_invoice_amount({}, lines)
-    assert round(total, 2) == round(10000 + 900 + 900 - 100, 2)
+    assert round(total, 2) == round(10000 + 900 + 900 + 100, 2)
 
 
 # ── A4: IRP rejects a ValDtls that does not balance ──────────────────────────

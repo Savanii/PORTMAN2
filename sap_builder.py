@@ -13,7 +13,7 @@ Header fields (PORTBIRD spec):
   Reference              16 char — PMS doc number; for reversals: original SAP Document_Number
   Document_type          DR for Invoice / Debit Note, DG for Credit Note
   Customer_Code          10 char
-  Invoice_Amount         13 curr (taxable + GST + TDS - TCS + Round_off, always positive)
+  Invoice_Amount         13 curr (taxable + GST + TCS + Round_off, always positive)
   Business_place
   Section_code
   Text                   short narration (25 char)
@@ -93,57 +93,6 @@ def _fmt_amount_required(amount):
     if amount is None:
         return '0.00'
     return f'{float(amount):.2f}'
-
-
-def _num(val):
-    """Parse a formatted ITEM field back to float ('' → 0.0)."""
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-# ---------------------------------------------------------------------------
-# One ITEM per GL account
-# ---------------------------------------------------------------------------
-
-# Summed when two ITEM lines collapse onto the same GL account.
-_MERGE_SUM_FIELDS = ('CGST_AMT', 'SGST_AMT', 'IGST_AMT', 'TDS_amount', 'TCS_amount')
-# Owned by the merge itself — never copied across from a later line.
-_MERGE_SKIP_FIELDS = _MERGE_SUM_FIELDS + ('Amount', 'Quantity', 'Unit_Price')
-
-
-def _merge_same_gl_items(items):
-    """Collapse ITEM entries that share a GL_account — SAP posts one line per GL.
-
-    Amount and the GST/TDS/TCS amounts sum. Quantity sums only when every merged
-    line carries one. Unit_Price survives only when uniform: a mixed-rate merge
-    blanks it, because Amount is the authoritative figure.
-    """
-    merged, by_gl = [], {}
-    for item in items:
-        gl = item.get('GL_account') or ''
-        tgt = by_gl.get(gl)
-        if tgt is None:
-            tgt = dict(item)
-            by_gl[gl] = tgt
-            merged.append(tgt)
-            continue
-        tgt['Amount'] = _fmt_amount_required(_num(tgt['Amount']) + _num(item['Amount']))
-        for f in _MERGE_SUM_FIELDS:
-            tgt[f] = _fmt_amount(_num(tgt.get(f)) + _num(item.get(f)))
-        if tgt.get('Quantity') and item.get('Quantity'):
-            tgt['Quantity'] = f"{_num(tgt['Quantity']) + _num(item['Quantity']):.3f}"
-        else:
-            tgt['Quantity'] = ''
-        if tgt.get('Unit_Price') != item.get('Unit_Price'):
-            tgt['Unit_Price'] = ''
-        # A blank on the surviving line (e.g. GST GLs on a zero-GST first line)
-        # is filled from the line that brought the amount in.
-        for f, v in item.items():
-            if f not in _MERGE_SKIP_FIELDS and v and not tgt.get(f):
-                tgt[f] = v
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +188,39 @@ def _service_sale_flag(lines, svc_map):
 # Item builder (shared by all non-reversal document types)
 # ---------------------------------------------------------------------------
 
+# Fields that are summed when merging; everything else must match for two
+# items to collapse into one SAP line (GL, tax code, HSN, GST/TDS/TCS GLs,
+# centers, plant, text, UOM).
+_MERGE_SUM_FIELDS = ('CGST_AMT', 'SGST_AMT', 'IGST_AMT', 'TDS_amount', 'TCS_amount')
+_MERGE_SKIP_FIELDS = _MERGE_SUM_FIELDS + (
+    'Amount', 'Quantity', 'Unit_Price', 'Round_off_GL', 'Round_off_Value')
+
+
+def _merge_same_gl_items(items):
+    """Collapse items posting to the same GL into a single SAP line.
+
+    SAP expects one ITEM per GL account: amounts, GST, TDS/TCS and quantity
+    are summed. Unit_Price survives only when uniform across the merged
+    lines — Amount is authoritative, so mixed rates leave it blank.
+    """
+    merged = {}
+    for it in items:
+        key = tuple(v for k, v in it.items() if k not in _MERGE_SKIP_FIELDS)
+        tgt = merged.get(key)
+        if tgt is None:
+            merged[key] = it
+            continue
+        tgt['Amount'] = _fmt_amount_required(float(tgt['Amount'] or 0) + float(it['Amount'] or 0))
+        for f in _MERGE_SUM_FIELDS:
+            tgt[f] = _fmt_amount(float(tgt[f] or 0) + float(it[f] or 0))
+        if tgt['Quantity'] and it['Quantity']:
+            tgt['Quantity'] = f"{float(tgt['Quantity']) + float(it['Quantity']):.3f}"
+        else:
+            tgt['Quantity'] = ''
+        if tgt['Unit_Price'] != it['Unit_Price']:
+            tgt['Unit_Price'] = ''
+    return list(merged.values())
+
 def _build_items(lines, reference, amount_field='line_amount',
                  config_defaults=None, svc_map=None, doc_type='DR',
                  round_off=0):
@@ -296,9 +278,9 @@ def _build_items(lines, reference, amount_field='line_amount',
         #   IGST > 0   → inter-state → igst_tax_code
         #   CGST/SGST  → intra-state → cgst_tax_code
         if igst > 0:
-            tax_code = config_defaults.get('igst_tax_code') or ''
+            tax_code = config_defaults.get('igst_tax_code') or config_defaults.get('tax_code') or ''
         elif (cgst + sgst) > 0:
-            tax_code = config_defaults.get('cgst_tax_code') or ''
+            tax_code = config_defaults.get('cgst_tax_code') or config_defaults.get('tax_code') or ''
         else:
             tax_code = ''
 
@@ -355,7 +337,7 @@ def _build_items(lines, reference, amount_field='line_amount',
             'Round_off_Value':  '',
         })
 
-    # One ITEM per GL account, then round-off onto the first MERGED item.
+    # Merge lines posting to the same GL before round-off placement.
     items = _merge_same_gl_items(items)
 
     # Apply header-level round-off to the first item (positive sign, per SAP).
@@ -366,29 +348,42 @@ def _build_items(lines, reference, amount_field='line_amount',
     return items
 
 
-def _component(header, lines, key, line_key=None):
-    """Header figure for `key`, falling back to the sum over the lines."""
-    val = float(header.get(key) or 0)
-    if val:
-        return val
-    return sum(float(l.get(line_key or key) or 0) for l in lines)
-
-
 def _total_invoice_amount(header, lines, amount_field='line_amount'):
-    """Return net invoice value (taxable + GST + TDS - TCS + Round_off).
+    """Return the receivable: taxable + GST + TCS + Round_off.
 
-    Always rebuilt from components. `total_amount` is deliberately not used:
-    its convention has shifted before (growing to include TCS), which
-    double-counted TCS here.
+    This is the customer's debit line, and it must equal the face value of the
+    invoice the customer was handed — the same number the IRP validates as
+    `TotInvVal` (see einvoice_builder).
+
+      * TCS is collected *from* the customer, so it is part of what they owe.
+        It is added. Subtracting it (sign inverted 2026-05-15 .. 2026-09-11)
+        understated every TCS receivable by 2x the TCS.
+      * TDS does not appear at all. It is the customer's own withholding at
+        payment time, not a reduction of the invoice — `total_amount` and the
+        e-invoice `TotInvVal` both exclude it, so netting it off here would put
+        SAP out of step with the printed document. `TDS_GL`/`TDS_amount` still
+        ride on the ITEM for SAP's withholding-tax records.
+
+    The taxable + GST base is rebuilt from the header's own components — never
+    from `total_amount`, which is a display total that already includes TCS and
+    would double-count it here.
     """
-    subtotal = _component(header, lines, 'subtotal', amount_field)
-    gst = sum(_component(header, lines, k)
-              for k in ('cgst_amount', 'sgst_amount', 'igst_amount'))
-    tds = _component(header, lines, 'tds_amount')
-    tcs = _component(header, lines, 'tcs_amount')
+    total = (float(header.get('subtotal') or 0)
+             + float(header.get('cgst_amount') or 0)
+             + float(header.get('sgst_amount') or 0)
+             + float(header.get('igst_amount') or 0))
+    if not total:
+        total  = sum(float(l.get(amount_field) or 0) for l in lines)
+        total += sum(float(l.get('cgst_amount') or 0) for l in lines)
+        total += sum(float(l.get('sgst_amount') or 0) for l in lines)
+        total += sum(float(l.get('igst_amount') or 0) for l in lines)
+
+    tcs = float(header.get('tcs_amount') or 0)
+    if not tcs:
+        tcs = sum(float(l.get('tcs_amount') or 0) for l in lines)
     round_off = float(header.get('round_off') or 0)
 
-    return subtotal + gst + tds - tcs + round_off
+    return total + tcs + round_off
 
 
 # ---------------------------------------------------------------------------
@@ -528,8 +523,8 @@ def build_fdcn_payload(fdcn_header, fdcn_lines):
         company=company,
         inv_date=doc_date,
         reference=reference,
-        # Reference is the parent invoice — the header text carries the note's
-        # own number so a CN/DN stays identifiable in SAP.
+        # Document_Header_Text carries the CN/DN's OWN number, so a note is
+        # identifiable in SAP even though its Reference is the parent invoice.
         header_text=doc_number or reference,
         short_text=reference,
         currency='INR',

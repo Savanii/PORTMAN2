@@ -234,7 +234,8 @@ def save_bill_line(data):
     svc_id = data.get('service_type_id')
     if svc_id:
         cur.execute(
-            'SELECT service_code, is_tds, tds_percent, is_tcs, tcs_percent, gst_rate_id, sac_code FROM finance_service_types WHERE id = %s',
+            'SELECT service_code, is_tds, tds_percent, is_tcs, tcs_percent, gst_rate_id, '
+            'sac_code, sap_gl_account, gl_code FROM finance_service_types WHERE id = %s',
             [svc_id]
         )
         svc = cur.fetchone()
@@ -242,6 +243,11 @@ def save_bill_line(data):
             service_code = service_code or (svc.get('service_code') or '')
             if not data.get('sac_code'):
                 data['sac_code'] = svc.get('sac_code') or ''
+            # The SAP ITEM posts to GL_account, which reads gl_code — fall back
+            # to the service master so a service configured only with
+            # sap_gl_account still posts to the right GL.
+            if not data.get('gl_code'):
+                data['gl_code'] = svc.get('sap_gl_account') or svc.get('gl_code') or ''
             # TDS — calculated on basic amount only
             if not data.get('tds_applicable') and svc.get('is_tds'):
                 tds_applicable = 1
@@ -386,7 +392,8 @@ def delete_bill_line(row_id):
     conn = get_db()
     cur = get_cursor(conn)
     cur.execute(
-        'SELECT cargo_source_type, cargo_source_id, quantity, service_record_id FROM bill_lines WHERE id=%s',
+        'SELECT bill_id, cargo_source_type, cargo_source_id, quantity, service_record_id '
+        'FROM bill_lines WHERE id=%s',
         (row_id,)
     )
     bl = cur.fetchone()
@@ -403,6 +410,10 @@ def delete_bill_line(row_id):
                 [bl['service_record_id']]
             )
     cur.execute('DELETE FROM bill_lines WHERE id=%s', (row_id,))
+    # Without this the header keeps the deleted line's money, and SAP is handed
+    # a total its ITEMs no longer add up to.
+    if bl and bl.get('bill_id'):
+        recalc_bill_totals(cur, bl['bill_id'])
     conn.commit()
     conn.close()
 
@@ -574,6 +585,11 @@ def create_invoice_from_bills(bill_ids, invoice_data):
             'UPDATE invoice_header SET tds_amount = %s, tcs_amount = %s WHERE id = %s',
             [total_tds, total_tcs, invoice_id]
         )
+
+    # Recompute GST on the aggregated taxable per rate so the invoice and the
+    # SAP payload match SAP's own round(base x rate), and fold TCS into
+    # total_amount. Must run AFTER tcs_amount is set above — it reads it back.
+    reconcile_invoice_gst(cur, invoice_id)
 
     conn.commit()
     conn.close()
@@ -783,7 +799,6 @@ def generate_bill(data, created_by, bill_status, approved_by=None):
         header['approved_date'] = datetime.now().strftime('%Y-%m-%d')
     bill_id, bill_number = save_bill_header(header)
 
-    subtotal = cgst = sgst = igst = 0.0
     for l in lines:
         line_amount = round(float(l.get('quantity') or 0) * float(l.get('rate') or 0), 2)
         ld = {
@@ -801,18 +816,14 @@ def generate_bill(data, created_by, bill_status, approved_by=None):
             'customer_gstin': data.get('customer_gstin'),
             'customer_state_code': data.get('customer_gst_state_code'),
         }
-        save_bill_line(ld)  # computes + stores cgst/sgst/igst/tds/line_total on ld and the row
-        subtotal += line_amount
-        cgst += float(ld.get('cgst_amount') or 0)
-        sgst += float(ld.get('sgst_amount') or 0)
-        igst += float(ld.get('igst_amount') or 0)
+        save_bill_line(ld)  # computes + stores cgst/sgst/igst/tds/tcs/line_total
 
-    total = round(subtotal + cgst + sgst + igst, 2)
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('''UPDATE bill_header
-        SET subtotal=%s, cgst_amount=%s, sgst_amount=%s, igst_amount=%s, total_amount=%s
-        WHERE id=%s''', [subtotal, cgst, sgst, igst, total, bill_id])
+    # Totals come from the stored lines, never from the request payload: GST,
+    # TDS and TCS are all derived inside save_bill_line, so summing what the
+    # caller sent would drop them (TCS in particular — see bill_totals).
+    recalc_bill_totals(cur, bill_id)
     for vid in vcn_ids:
         cur.execute('INSERT INTO bill_vessels (bill_id, vcn_id) VALUES (%s, %s)', [bill_id, vid])
     for l in lines:
@@ -824,6 +835,181 @@ def generate_bill(data, created_by, bill_status, approved_by=None):
     conn.commit()
     conn.close()
     return bill_id, bill_number
+
+
+# ===== HEADER TOTALS (bill) =====
+
+def bill_totals(lines):
+    """Header totals from the bill's own stored lines.
+
+    The header is never allowed to carry numbers its lines do not back: GST,
+    TDS and TCS are all derived per line by save_bill_line from the service
+    master, so summing the request payload — which carries none of them —
+    is what once produced a bill with correct line figures and a 0.00 header.
+
+    TCS is collected from the customer, so it is part of what they owe and
+    belongs in total_amount. TDS is their own deduction at payment time —
+    informational, never subtracted here. The SAP payload does NOT read
+    total_amount; it rebuilds taxable + GST from the components (see
+    sap_builder._total_invoice_amount) so this convention cannot leak into it.
+    """
+    subtotal = sum(float(l.get('line_amount') or 0) for l in lines)
+    cgst = sum(float(l.get('cgst_amount') or 0) for l in lines)
+    sgst = sum(float(l.get('sgst_amount') or 0) for l in lines)
+    igst = sum(float(l.get('igst_amount') or 0) for l in lines)
+    tds = sum(float(l.get('tds_amount') or 0) for l in lines)
+    tcs = sum(float(l.get('tcs_amount') or 0) for l in lines)
+    return {'subtotal': round(subtotal, 2), 'cgst_amount': round(cgst, 2),
+            'sgst_amount': round(sgst, 2), 'igst_amount': round(igst, 2),
+            'tds_amount': round(tds, 2), 'tcs_amount': round(tcs, 2),
+            'total_amount': round(subtotal + cgst + sgst + igst + tcs, 2)}
+
+
+def recalc_bill_totals(cur, bill_id):
+    """Rewrite a bill header's totals from its stored lines. Caller commits."""
+    cur.execute("""SELECT line_amount, cgst_amount, sgst_amount, igst_amount,
+                          tds_amount, tcs_amount
+                   FROM bill_lines WHERE bill_id=%s""", [bill_id])
+    t = bill_totals([dict(r) for r in cur.fetchall()])
+    cur.execute("""UPDATE bill_header
+                   SET subtotal=%s, cgst_amount=%s, sgst_amount=%s,
+                       igst_amount=%s, tds_amount=%s, tcs_amount=%s, total_amount=%s
+                   WHERE id=%s""",
+                [t['subtotal'], t['cgst_amount'], t['sgst_amount'], t['igst_amount'],
+                 t['tds_amount'], t['tcs_amount'], t['total_amount'], bill_id])
+    return t
+
+
+# ===== AGGREGATE GST (invoice) =====
+
+def compute_aggregate_gst(lines):
+    """Compute GST on the aggregated taxable **per rate group**, rounded once
+    (the GST-compliant method), and redistribute each group's tax across its
+    lines so the per-line amounts still sum exactly to the group total.
+
+    This is what makes SAP auto-post: same-GL lines collapse into one ITEM
+    (sap_builder._merge_same_gl_items) and SAP re-derives tax as
+    round(base x rate) on that aggregate, so sending the sum of per-line
+    rounded tax — which drifts a paisa or two — never matches. Rounding once
+    on the aggregate does.
+
+    `lines`: dicts with keys id, line_amount, cgst_rate, sgst_rate, igst_rate.
+    Returns (line_gst, totals):
+      line_gst = {id: {cgst_amount, sgst_amount, igst_amount, line_total}}
+      totals   = {subtotal, cgst_amount, sgst_amount, igst_amount}
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for ln in lines:
+        key = (round(float(ln.get('cgst_rate') or 0), 4),
+               round(float(ln.get('sgst_rate') or 0), 4),
+               round(float(ln.get('igst_rate') or 0), 4))
+        groups[key].append(ln)
+
+    line_gst = {ln['id']: {'cgst_amount': 0.0, 'sgst_amount': 0.0, 'igst_amount': 0.0}
+                for ln in lines}
+
+    for (cr, sr, ir), glines in groups.items():
+        taxable = sum(float(l.get('line_amount') or 0) for l in glines)
+        for col, rate in (('cgst_amount', cr), ('sgst_amount', sr), ('igst_amount', ir)):
+            if rate <= 0:
+                continue
+            target = round(taxable * rate / 100, 2)
+            per_line = [round(float(l.get('line_amount') or 0) * rate / 100, 2) for l in glines]
+            residual = round(target - sum(per_line), 2)
+            if residual:
+                # Push the leftover paisa onto the largest line — least visible,
+                # deterministic, and keeps the group sum exact.
+                idx = max(range(len(glines)),
+                          key=lambda i: float(glines[i].get('line_amount') or 0))
+                per_line[idx] = round(per_line[idx] + residual, 2)
+            for l, val in zip(glines, per_line):
+                line_gst[l['id']][col] = val
+
+    subtotal = cg = sg = ig = 0.0
+    for ln in lines:
+        amt = float(ln.get('line_amount') or 0)
+        g = line_gst[ln['id']]
+        g['line_total'] = round(amt + g['cgst_amount'] + g['sgst_amount'] + g['igst_amount'], 2)
+        subtotal += amt
+        cg += g['cgst_amount']
+        sg += g['sgst_amount']
+        ig += g['igst_amount']
+    totals = {'subtotal': round(subtotal, 2), 'cgst_amount': round(cg, 2),
+              'sgst_amount': round(sg, 2), 'igst_amount': round(ig, 2)}
+    return line_gst, totals
+
+
+def amount_in_words(amount):
+    """Indian-format rupee words, mirroring the amountInWords() in
+    finv01_generate_invoice.html so a server-recomputed total keeps a matching
+    'Amount in Words' on the printed invoice."""
+    ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight',
+            'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen',
+            'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen']
+    tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy',
+            'Eighty', 'Ninety']
+
+    def to_words(n):
+        if n == 0:
+            return ''
+        if n < 20:
+            return ones[n] + ' '
+        if n < 100:
+            return tens[n // 10] + ' ' + (ones[n % 10] + ' ' if n % 10 else '')
+        if n < 1000:
+            return ones[n // 100] + ' Hundred ' + to_words(n % 100)
+        if n < 100000:
+            return to_words(n // 1000) + 'Thousand ' + to_words(n % 1000)
+        if n < 10000000:
+            return to_words(n // 100000) + 'Lakh ' + to_words(n % 100000)
+        return to_words(n // 10000000) + 'Crore ' + to_words(n % 10000000)
+
+    rounded = int(round(float(amount or 0) * 100))
+    rupees, paise = divmod(rounded, 100)
+    words = 'Rupees ' + to_words(rupees).strip()
+    if paise > 0:
+        words += ' and ' + to_words(paise).strip() + ' Paise'
+    return words + ' Only'
+
+
+def reconcile_invoice_gst(cur, invoice_id):
+    """Rewrite an invoice's GST to the aggregate-per-rate figures (see
+    compute_aggregate_gst) across its lines, header totals and amount-in-words,
+    so the print, SAC summary and SAP payload all agree with SAP's own
+    round(base x rate). Runs inside the caller's transaction; does NOT commit.
+
+    This is also where TCS lands in the invoice total: the header's
+    total_amount is rebuilt as taxable + GST + TCS + round-off, the same
+    convention bill_totals() applies and the same figure
+    sap_builder._total_invoice_amount and einvoice_builder's TotInvVal carry.
+    """
+    cur.execute('''SELECT id, line_amount, cgst_rate, sgst_rate, igst_rate
+                   FROM invoice_lines WHERE invoice_id=%s ORDER BY id''', [invoice_id])
+    lines = [dict(r) for r in cur.fetchall()]
+    if not lines:
+        return
+    line_gst, totals = compute_aggregate_gst(lines)
+    for lid, g in line_gst.items():
+        cur.execute('''UPDATE invoice_lines
+            SET cgst_amount=%s, sgst_amount=%s, igst_amount=%s, line_total=%s
+            WHERE id=%s''',
+            [g['cgst_amount'], g['sgst_amount'], g['igst_amount'], g['line_total'], lid])
+
+    cur.execute('SELECT round_off, tcs_amount FROM invoice_header WHERE id=%s', [invoice_id])
+    r = cur.fetchone()
+    round_off = float((r['round_off'] if r else 0) or 0)
+    # TCS is collected from the customer — same convention as bill_totals().
+    tcs = float((r['tcs_amount'] if r else 0) or 0)
+    total = round(totals['subtotal'] + totals['cgst_amount'] + totals['sgst_amount']
+                  + totals['igst_amount'] + tcs + round_off, 2)
+    cur.execute('''UPDATE invoice_header
+        SET subtotal=%s, cgst_amount=%s, sgst_amount=%s, igst_amount=%s,
+            total_amount=%s, amount_in_words=%s
+        WHERE id=%s''',
+        [totals['subtotal'], totals['cgst_amount'], totals['sgst_amount'],
+         totals['igst_amount'], total, amount_in_words(total), invoice_id])
+
 
 
 # ===== BILLABLES ENGINE (parcels -> 4 charges, grouped by vessel) =====
@@ -901,18 +1087,6 @@ def unclosed_vcn_docs(vcn_ids):
     docs = [r['vcn_doc_num'] for r in cur.fetchall()]
     conn.close()
     return docs
-
-
-def verify_user_password(user_id, password):
-    """Re-authenticate the logged-in user (same plaintext check as login)."""
-    if not password:
-        return False
-    conn = get_db()
-    cur = get_cursor(conn)
-    cur.execute('SELECT 1 AS ok FROM users WHERE id=%s AND password=%s', [user_id, password])
-    ok = cur.fetchone() is not None
-    conn.close()
-    return ok
 
 
 def get_customer_billables(customer_type, customer_id):

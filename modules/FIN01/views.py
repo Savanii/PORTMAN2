@@ -286,12 +286,6 @@ def save_bill():
 
     row_id, bill_number = model.save_bill_header(data)
 
-    # Save bill lines and calculate totals
-    subtotal = 0
-    cgst_total = 0
-    sgst_total = 0
-    igst_total = 0
-
     customer_gstin = data.get('customer_gstin') or ''
 
     for line in lines:
@@ -304,19 +298,12 @@ def save_bill():
         if not line.get('service_description'):
             line['service_description'] = line.get('description', '')
         model.save_bill_line(line)
-        subtotal += float(line.get('line_amount') or 0)
-        cgst_total += float(line.get('cgst_amount') or 0)
-        sgst_total += float(line.get('sgst_amount') or 0)
-        igst_total += float(line.get('igst_amount') or 0)
 
-    # Update bill header with calculated totals + mark source records as billed
-    total_amount = subtotal + cgst_total + sgst_total + igst_total
     conn = get_db()
     cur = get_cursor(conn)
-    cur.execute('''UPDATE bill_header
-        SET subtotal=%s, cgst_amount=%s, sgst_amount=%s, igst_amount=%s, total_amount=%s
-        WHERE id=%s''',
-        [subtotal, cgst_total, sgst_total, igst_total, total_amount, row_id])
+    # From the stored lines, not the request payload — GST, TDS and TCS are all
+    # derived inside save_bill_line, and the payload carries none of them.
+    total_amount = model.recalc_bill_totals(cur, row_id)['total_amount']
 
     # Mark service records as billed
     for line in lines:
@@ -336,10 +323,9 @@ def save_bill():
 @bp.route('/api/module/FIN01/bill/generate', methods=['POST'])
 def bill_generate():
     """Generate the ACTUAL bill across selected vessels from picked billable
-    lines. Password-confirmed: the user re-enters their password and the bill
-    is born Approved (no Draft stage, not deletable). Only vessels whose
-    latest LDUD is Closed/Partial Close can be billed — earlier the customer
-    only gets a pro forma invoice."""
+    lines. The bill is born Approved (no Draft stage, not deletable). Only
+    vessels whose latest LDUD is Closed/Partial Close can be billed — earlier
+    the customer only gets a pro forma invoice."""
     if 'user_id' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'})
     perms = get_user_permissions(session['user_id'], 'FIN01')
@@ -352,9 +338,6 @@ def bill_generate():
         return jsonify({'success': False, 'error': 'No lines selected'})
     if any(float(l.get('rate') or 0) <= 0 for l in lines):
         return jsonify({'success': False, 'error': 'Every selected line needs a rate greater than 0'})
-
-    if not model.verify_user_password(session['user_id'], data.get('password')):
-        return jsonify({'success': False, 'error': 'Incorrect password — bill not generated'})
 
     vcn_ids = sorted({l.get('vcn_id') for l in lines if l.get('vcn_id')})
     unclosed = model.unclosed_vcn_docs(vcn_ids)

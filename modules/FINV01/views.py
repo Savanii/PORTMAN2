@@ -303,7 +303,9 @@ def create_invoice_record(customer_type, customer_id, bill_ids, created_by, over
                COALESCE(SUM(total_amount),0) AS total_amount,
                COALESCE(SUM(cgst_amount),0)  AS cgst_amount,
                COALESCE(SUM(sgst_amount),0)  AS sgst_amount,
-               COALESCE(SUM(igst_amount),0)  AS igst_amount
+               COALESCE(SUM(igst_amount),0)  AS igst_amount,
+               COALESCE(SUM(tds_amount),0)   AS tds_amount,
+               COALESCE(SUM(tcs_amount),0)   AS tcs_amount
         FROM bill_header WHERE id = ANY(%s)
     ''', [bill_ids])
     totals = dict(cur.fetchone() or {})
@@ -333,8 +335,11 @@ def create_invoice_record(customer_type, customer_id, bill_ids, created_by, over
         'cgst_amount': totals.get('cgst_amount'),
         'sgst_amount': totals.get('sgst_amount'),
         'igst_amount': totals.get('igst_amount'),
-        'tds_amount': 0,
-        'tcs_amount': 0,
+        # Carried from the bills so the invoice is born with them; FIN01's
+        # create_invoice_from_bills then re-derives both from the copied lines
+        # and reconcile_invoice_gst folds TCS into total_amount.
+        'tds_amount': totals.get('tds_amount'),
+        'tcs_amount': totals.get('tcs_amount'),
         'round_off': 0,
         'total_amount': totals.get('total_amount'),
         'created_by': created_by,
@@ -440,129 +445,294 @@ def _fmt_lueu_timestamp(date_val, time_val):
     return date_txt or time_txt
 
 
-_CH_CODES = ('CHGL01', 'CHGU01')
+# Parcel tables, keyed by bill_lines.cargo_source_type. Both carry the same
+# columns since jnpa35 — only vcn_consigners has BL details.
+_PARCEL_TABLES = {
+    'VCN_IMPORT': 'vcn_consigners',
+    'VCN_EXPORT': 'vcn_export_cargo_declaration',
+}
 
 
-def _build_display_lines(invoice_lines):
+def _cargo_names_for_invoice(cur, invoice_id):
+    """{(cargo_source_type, cargo_source_id): cargo_name} for one invoice.
+
+    One query per parcel table rather than per line — a per-line lookup opens a
+    fresh DB connection each time and would dominate the print.
     """
-    For the invoice print items table, merge cargo handling lines by rate:
-      - All cargo lines at the same rate  → one merged row (summed qty + amount)
-      - Cargo lines at different rates    → one row per distinct rate (summed within each)
-      - Non-cargo lines                   → passed through unchanged in original order
+    cur.execute('''
+        SELECT DISTINCT bl.cargo_source_type, bl.cargo_source_id
+        FROM invoice_bill_mapping ibm
+        JOIN bill_lines bl ON bl.bill_id = ibm.bill_id
+        WHERE ibm.invoice_id = %s
+          AND bl.cargo_source_type IS NOT NULL AND bl.cargo_source_id IS NOT NULL
+    ''', [invoice_id])
+    wanted = {}
+    for r in cur.fetchall():
+        wanted.setdefault(r['cargo_source_type'], []).append(r['cargo_source_id'])
 
-    Non-cargo lines appear first (original order), then cargo row(s) sorted by rate.
-    `invoice_lines` itself is never modified — the caller still uses it for the
-    SAC summary and cargo appendix.
+    names = {}
+    for src, ids in wanted.items():
+        table = _PARCEL_TABLES.get(src)
+        if not table or not ids:
+            continue
+        cur.execute(f'SELECT id, cargo_name FROM {table} WHERE id = ANY(%s)', [ids])
+        for row in cur.fetchall():
+            names[(src, row['id'])] = row['cargo_name'] or ''
+    return names
+
+
+def _invoice_charge_lines(cur, invoice_id):
+    """The invoice's billed lines with their cargo identity attached.
+
+    invoice_lines is a verbatim copy of bill_lines but drops
+    cargo_source_type/id, so the cargo a charge was raised on survives only on
+    the bill. Bills are frozen at Invoiced, so reading them back is safe — and
+    the caller checks the reconstructed total against the invoice before it
+    prints anything.
     """
-    non_cargo = []
-    cargo_by_rate = {}   # {rate_key: accumulator dict}
+    cur.execute('''
+        SELECT bl.service_code, bl.service_name, bl.sac_code, bl.uom,
+               bl.quantity, bl.rate, bl.line_amount,
+               bl.cgst_rate, bl.sgst_rate, bl.igst_rate,
+               bl.cargo_source_type, bl.cargo_source_id, bl.service_record_id
+        FROM invoice_bill_mapping ibm
+        JOIN bill_lines bl ON bl.bill_id = ibm.bill_id
+        WHERE ibm.invoice_id = %s
+        ORDER BY ibm.id, bl.id
+    ''', [invoice_id])
+    lines = [dict(r) for r in cur.fetchall()]
+    names = _cargo_names_for_invoice(cur, invoice_id)
+    for line in lines:
+        line['cargo_name'] = names.get(
+            (line.get('cargo_source_type'), line.get('cargo_source_id')), '')
+    return lines
 
-    for line in invoice_lines:
-        if line.get('service_code') in _CH_CODES:
-            rate_key = round(float(line.get('rate') or 0), 4)
-            if rate_key not in cargo_by_rate:
-                cargo_by_rate[rate_key] = {
-                    'service_code': line['service_code'],
-                    'service_name': 'Cargo Handling Services',
-                    'sac_code':     line.get('sac_code') or '',
-                    'rate':         rate_key,
-                    'quantity':     0.0,
-                    'line_amount':  0.0,
-                    'uom':          line.get('uom') or '',
-                }
-            cargo_by_rate[rate_key]['quantity']   += float(line.get('quantity')   or 0)
-            cargo_by_rate[rate_key]['line_amount'] += float(line.get('line_amount') or 0)
-        else:
-            non_cargo.append(line)
 
-    cargo_rows = sorted(cargo_by_rate.values(), key=lambda r: r['rate'])
-    return non_cargo + cargo_rows
+def _group_cargo_lines(lines):
+    """Service heading + one indented row per cargo, as the pro forma prints it.
+
+    The billables engine emits per-parcel lines (P1/handling, P1/infra,
+    P2/handling...). Printing those raw is unreadable, and collapsing them all
+    into a single "Cargo Handling Services" row loses which cargo was charged.
+    So: a heading per service carrying no figures, and beneath it one row per
+    cargo — parcels of the same cargo at the same rate merge, a cargo priced
+    differently keeps its own row instead of being averaged into its
+    neighbours. Only the cargo rows carry figures, so they sum to the Sub Total
+    without double counting.
+
+    Mirrors FIN01.proforma_pdf.group_lines — the invoice has to read like the
+    pro forma the customer already approved.
+    """
+    order, groups = [], {}
+    for line in lines:
+        key = line.get('service_code') or line.get('service_name')
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(line)
+
+    rows = []
+    for key in order:
+        members = groups[key]
+        name = members[0].get('service_name') or key
+        rows.append({'service_name': name, 'sac_code': members[0].get('sac_code') or '',
+                     'is_heading': True, 'indent': False,
+                     'quantity': None, 'rate': None, 'line_amount': None})
+        by_cargo, cargo_order = {}, []
+        for line in members:
+            ck = (line.get('cargo_name') or name, round(float(line.get('rate') or 0), 4))
+            if ck not in by_cargo:
+                cargo_order.append(ck)
+                by_cargo[ck] = []
+            by_cargo[ck].append(line)
+        for ck in cargo_order:
+            cargo, rate = ck
+            members_ck = by_cargo[ck]
+            rows.append({
+                'service_name': cargo, 'sac_code': '', 'is_heading': False,
+                'indent': True,
+                'quantity': round(sum(float(x.get('quantity') or 0) for x in members_ck), 3),
+                'rate': rate,
+                'line_amount': round(sum(float(x.get('line_amount') or 0) for x in members_ck), 2),
+                'uom': members_ck[0].get('uom') or '',
+            })
+    return rows
+
+
+def _flat_service_lines(lines):
+    """One row per service, figures on the row itself.
+
+    A service charge has no cargo, so _group_cargo_lines' detail row would just
+    repeat the heading. Lines of one service priced differently keep separate
+    rows, the same rule the grouping applies.
+
+    Mirrors FIN01.proforma_pdf.flat_lines.
+    """
+    order, rows = [], {}
+    for line in lines:
+        name = line.get('service_name') or line.get('service_code') or ''
+        cargo = line.get('cargo_name') or ''
+        key = (name, round(float(line.get('rate') or 0), 4), cargo)
+        if key not in rows:
+            order.append(key)
+            rows[key] = {'service_name': ' - '.join(x for x in (name, cargo) if x),
+                         'sac_code': line.get('sac_code') or '', 'is_heading': False,
+                         'indent': False, 'quantity': 0.0, 'rate': key[1],
+                         'line_amount': 0.0, 'uom': line.get('uom') or ''}
+        rows[key]['quantity'] = round(rows[key]['quantity'] + float(line.get('quantity') or 0), 3)
+        rows[key]['line_amount'] = round(rows[key]['line_amount'] + float(line.get('line_amount') or 0), 2)
+    return [rows[k] for k in order]
+
+
+def _build_display_lines(cur, invoice_id, invoice_lines, subtotal):
+    """Items-table rows for the invoice print, structured like the pro forma.
+
+    Cargo charges become a service heading with a row per cargo underneath;
+    service charges stay one row each. Falls back to the raw invoice lines if
+    the reconstruction does not add up to the invoice subtotal — the printed
+    document must never disagree with the figure it was invoiced for.
+    """
+    try:
+        lines = _invoice_charge_lines(cur, invoice_id)
+    except Exception as e:
+        log.error(f'[PRINT] Invoice {invoice_id}: charge lines failed: {e}', exc_info=True)
+        return list(invoice_lines)
+    if not lines:
+        return list(invoice_lines)
+
+    cargo = [line for line in lines if line.get('cargo_source_id')]
+    service = [line for line in lines if not line.get('cargo_source_id')]
+    rows = _group_cargo_lines(cargo) + _flat_service_lines(service)
+
+    printed = round(sum(float(r['line_amount'] or 0) for r in rows), 2)
+    if abs(printed - round(float(subtotal or 0), 2)) > 0.05:
+        log.warning(f'[PRINT] Invoice {invoice_id}: grouped rows total {printed} != '
+                    f'subtotal {subtotal} — printing raw invoice lines')
+        return list(invoice_lines)
+    return rows
+
+
+def _gst_rate_lines(invoice_lines):
+    """One GST row per distinct rate actually in play.
+
+    The totals block used to back-compute a single percentage from
+    cgst_amount / subtotal. On an invoice mixing 18% cargo handling with
+    0%-rated toll that prints a blended "14%" matching no rate anyone charged.
+    Bucketing by the per-line rate shows the real rates instead, and stays
+    silent about the components that carry no tax.
+
+    Mirrors FIN01.proforma_pdf.tax_lines.
+    """
+    out = []
+    for field, label in (('cgst_rate', 'CGST'), ('sgst_rate', 'SGST'), ('igst_rate', 'IGST')):
+        amount_field = field.replace('_rate', '_amount')
+        buckets = {}
+        for line in invoice_lines:
+            pct = float(line.get(field) or 0)
+            amt = float(line.get(amount_field) or 0)
+            if pct and amt:
+                buckets[pct] = round(buckets.get(pct, 0.0) + amt, 2)
+        for pct in sorted(buckets):
+            out.append({'label': f'{label} {pct:g}%', 'amount': buckets[pct]})
+    return out
 
 
 def _get_cargo_handling_details(invoice_id):
-    """
-    Build cargo appendix rows for invoice print.
-    Source: bill_lines.cargo_source_type / cargo_source_id
-      VCN_IMPORT  -> vcn_cargo_declaration  -> ldud_anchorage for timing
-      VCN_EXPORT  -> vcn_export_cargo_declaration -> ldud_anchorage for timing
+    """Cargo appendix rows for the invoice print, one per billed parcel.
+
+    Source: bill_lines.cargo_source_type / cargo_source_id, resolved against
+    the parcel tables in _PARCEL_TABLES. Both tables have carried the same
+    columns since jnpa35 (parcel_no, cargo_name, quantity, importer_name);
+    only vcn_consigners has BL details, so export rows print those blank.
+    Timings come from the vessel's LDUD.
     """
     conn = get_db()
     cur = get_cursor(conn)
     rows = []
-    seen = set()
     try:
-        # Get all cargo source references for this invoice
         cur.execute('''
-            SELECT DISTINCT bl.cargo_source_type, bl.cargo_source_id,
-                            SUM(bl.quantity) OVER (
-                                PARTITION BY bl.cargo_source_type, bl.cargo_source_id
-                            ) AS billed_qty
+            SELECT bl.cargo_source_type, bl.cargo_source_id,
+                   SUM(bl.quantity) AS billed_qty
             FROM invoice_bill_mapping ibm
             JOIN bill_lines bl ON bl.bill_id = ibm.bill_id
             WHERE ibm.invoice_id = %s
               AND bl.cargo_source_type IS NOT NULL
               AND bl.cargo_source_id IS NOT NULL
+            GROUP BY bl.cargo_source_type, bl.cargo_source_id
         ''', [invoice_id])
         sources = [dict(r) for r in cur.fetchall()]
 
+        # Same charge raised on several services sums per parcel above, which
+        # would multiply the appendix quantity — take the largest single
+        # service's quantity as the parcel's handled figure instead.
+        cur.execute('''
+            SELECT bl.cargo_source_type, bl.cargo_source_id,
+                   MAX(bl.quantity) AS parcel_qty
+            FROM invoice_bill_mapping ibm
+            JOIN bill_lines bl ON bl.bill_id = ibm.bill_id
+            WHERE ibm.invoice_id = %s
+              AND bl.cargo_source_type IS NOT NULL
+              AND bl.cargo_source_id IS NOT NULL
+            GROUP BY bl.cargo_source_type, bl.cargo_source_id
+        ''', [invoice_id])
+        qty_by_src = {(r['cargo_source_type'], r['cargo_source_id']): float(r['parcel_qty'] or 0)
+                      for r in cur.fetchall()}
+
+        def _ts(val):
+            if not val:
+                return ''
+            s = str(val).strip()
+            return (s[:10] + ' ' + s[11:16]).strip() if len(s) >= 16 else s[:10]
+
+        timings = {}
         for src in sources:
-            cstype = src['cargo_source_type']
-            csid   = src['cargo_source_id']
-            key    = (cstype, csid)
-            if key in seen:
+            cstype, csid = src['cargo_source_type'], src['cargo_source_id']
+            table = _PARCEL_TABLES.get(cstype)
+            if not table:
                 continue
-            seen.add(key)
 
-            billed_qty = float(src.get('billed_qty') or 0)
+            bl_cols = ('p.bl_no, p.bl_date' if table == 'vcn_consigners'
+                       else "'' AS bl_no, NULL AS bl_date")
+            cur.execute(f'''
+                SELECT p.vcn_id, p.parcel_no, p.cargo_name, p.importer_name,
+                       {bl_cols},
+                       vh.vcn_doc_num, vh.vessel_name
+                FROM {table} p
+                JOIN vcn_header vh ON p.vcn_id = vh.id
+                WHERE p.id = %s
+            ''', [csid])
+            parcel = cur.fetchone()
+            if not parcel:
+                continue
 
-            if cstype in ('VCN_IMPORT', 'VCN_EXPORT'):
-                table = 'vcn_cargo_declaration' if cstype == 'VCN_IMPORT' else 'vcn_export_cargo_declaration'
-                cur.execute(f'''
-                    SELECT cd.vcn_id, cd.cargo_name, cd.bl_no, cd.bl_date,
-                           cd.bl_quantity, cd.quantity_uom, cd.customer_name,
-                           vh.vcn_doc_num, vh.vessel_name
-                    FROM {table} cd
-                    JOIN vcn_header vh ON cd.vcn_id = vh.id
-                    WHERE cd.id = %s
-                ''', [csid])
-                decl = cur.fetchone()
-                if not decl:
-                    continue
-
-                vcn_id = decl['vcn_id']
-
-                # Discharge Commenced / Discharge Completed from ldud_header
+            vcn_id = parcel['vcn_id']
+            if vcn_id not in timings:
                 cur.execute('''
                     SELECT MIN(discharge_commenced) AS start_dt,
                            MAX(discharge_completed)  AS end_dt
-                    FROM ldud_header
-                    WHERE vcn_id = %s
+                    FROM ldud_header WHERE vcn_id = %s
                 ''', [vcn_id])
-                timing = cur.fetchone()
+                t = cur.fetchone()
+                timings[vcn_id] = (_ts(t['start_dt'] if t else None),
+                                   _ts(t['end_dt'] if t else None))
+            start, end = timings[vcn_id]
 
-                def _ts(val):
-                    if not val:
-                        return ''
-                    s = str(val).strip()
-                    return (s[:10] + ' ' + s[11:16]).strip() if len(s) >= 16 else s[:10]
-
-                rows.append({
-                    'source_type':       'VCN',
-                    'source_id':         vcn_id,
-                    'vessel_name':       decl['vessel_name'] or '',
-                    'vcn_doc_num':       decl['vcn_doc_num'] or '',
-                    'consignee':         decl['customer_name'] or '',
-                    'cargo':             decl['cargo_name'] or '',
-                    'bl_no':             decl['bl_no'] or '',
-                    'bl_date':           str(decl['bl_date'] or '')[:10],
-                    'quantity':          billed_qty,
-                    'uom':               decl['quantity_uom'] or 'MT',
-                    'source_type_label': 'MV',
-                    'start':             _ts(timing['start_dt'] if timing else None),
-                    'end':               _ts(timing['end_dt']   if timing else None),
-                })
-
-
+            rows.append({
+                'source_type':       'VCN',
+                'source_id':         vcn_id,
+                'vessel_name':       parcel['vessel_name'] or '',
+                'vcn_doc_num':       parcel['vcn_doc_num'] or '',
+                'parcel_no':         parcel['parcel_no'] or '',
+                'consignee':         parcel['importer_name'] or '',
+                'cargo':             parcel['cargo_name'] or '',
+                'bl_no':             parcel['bl_no'] or '',
+                'bl_date':           str(parcel['bl_date'] or '')[:10],
+                'quantity':          qty_by_src.get((cstype, csid), 0.0),
+                'uom':               'MT',
+                'source_type_label': 'MV',
+                'start':             start,
+                'end':               end,
+            })
         return rows
     except Exception as e:
         log.error(f'[CARGO] Error for invoice {invoice_id}: {e}', exc_info=True)
@@ -687,8 +857,16 @@ def print_invoice(invoice_id):
 
     current_datetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # Build display lines: cargo handling grouped by rate for the print table
-    display_lines = _build_display_lines(invoice_lines)
+    # Items table + GST rows, both structured the way the pro forma prints:
+    # a heading per service with its cargo underneath, and one GST row per rate
+    # actually charged. One cursor for both — get_db() costs a connection.
+    conn_d = get_db()
+    try:
+        display_lines = _build_display_lines(
+            get_cursor(conn_d), invoice_id, invoice_lines, invoice.get('subtotal'))
+    finally:
+        conn_d.close()
+    gst_lines = _gst_rate_lines(invoice_lines)
 
     # Fetch cargo handling details by tracing bill chain
     cargo_details = _get_cargo_handling_details(invoice_id)
@@ -714,6 +892,7 @@ def print_invoice(invoice_id):
                          invoice=invoice,
                          invoice_lines=invoice_lines,
                          display_lines=display_lines,
+                         gst_lines=gst_lines,
                          sac_summary=sac_summary,
                          port_config=port_config,
                          payment_bank=payment_bank,
